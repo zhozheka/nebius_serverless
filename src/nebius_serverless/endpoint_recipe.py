@@ -8,14 +8,19 @@ from .recipe import (
     DISK_DEFAULT,
     SHM_BYTES,
     SHM_LABEL,
+    describe_extras,
     parse_volume,
     quoted_args,
+    secret_ref,
+    spec_extras,
     validate_command,
+    validate_secret_ref,
 )
 
 AUTH_MODES = ("none", "token")
 TOKEN_GENERATED = "generated"
 TOKEN_PROVIDED = "provided"
+TOKEN_SECRET = "secret"
 _OPERATION = "Endpoint"
 
 
@@ -71,6 +76,30 @@ def validate_token(token: object, auth: str) -> str | None:
     return token
 
 
+def validate_token_secret(
+    token_secret: object,
+    auth: str,
+    token: str | None,
+) -> str | None:
+    """A MysteryBox secret holding ``AUTH_TOKEN``. Excludes ``token``."""
+    if token_secret is None:
+        return None
+    value = validate_secret_ref(
+        token_secret, "token_secret", operation=_OPERATION
+    )
+    if auth != "token":
+        raise ValidationError(
+            "token_secret requires auth='token'.",
+            operation=_OPERATION,
+        )
+    if token is not None:
+        raise ValidationError(
+            "Set token or token_secret, not both.",
+            operation=_OPERATION,
+        )
+    return value
+
+
 def generate_token() -> str:
     """A random bearer token, as the CLI makes for ``--auth token``."""
     return secrets.token_urlsafe(32)
@@ -94,6 +123,11 @@ def describe_endpoint(
     env_keys: Sequence[str],
     name: str,
     disk: str | None,
+    token_secret: str | None = None,
+    working_dir: str | None = None,
+    secrets: Sequence[tuple[str, str]] = (),
+    registry_secret: str | None = None,
+    spot_policy: str | None = None,
 ) -> dict[str, object]:
     """Build the dry-run description. Env values and tokens are left out."""
     description: dict[str, object] = {"image": image}
@@ -109,7 +143,10 @@ def describe_endpoint(
     description["preset"] = preset
     description["pricing"] = pricing
     description["auth"] = auth
-    if auth == "token":
+    if token_secret is not None:
+        description["token"] = TOKEN_SECRET
+        description["token_secret"] = token_secret
+    elif auth == "token":
         description["token"] = (
             TOKEN_PROVIDED if token_supplied else TOKEN_GENERATED
         )
@@ -123,6 +160,13 @@ def describe_endpoint(
     description["name"] = name
     description["disk"] = disk if disk is not None else DISK_DEFAULT
     description["shm"] = SHM_LABEL
+    describe_extras(
+        description,
+        working_dir=working_dir,
+        secrets=secrets,
+        registry_secret=registry_secret,
+        spot_policy=spot_policy,
+    )
     return description
 
 
@@ -142,6 +186,11 @@ def endpoint_request_body(
     env: Sequence[tuple[str, str]],
     name: str,
     disk: str | None,
+    token_secret: str | None = None,
+    working_dir: str | None = None,
+    secrets: Sequence[tuple[str, str]] = (),
+    registry_secret: str | None = None,
+    spot_policy: str | None = None,
 ) -> dict[str, object]:
     """Map a recipe to the create body the endpoint transport sends."""
     spec: dict[str, object] = {"image": image}
@@ -161,15 +210,19 @@ def endpoint_request_body(
         spec["volumes"] = [parse_volume(item) for item in volumes]
     if inject_files:
         spec["injected_files"] = list(inject_files)
-    if env:
-        spec["environment_variables"] = [
-            {"name": key, "value": value} for key, value in env
-        ]
-    if pricing == "spot":
-        spec["preemptible"] = True
-        spec["follows_spot_price"] = True
+    spec_extras(
+        spec,
+        pricing=pricing,
+        env=env,
+        working_dir=working_dir,
+        secrets=secrets,
+        registry_secret=registry_secret,
+        spot_policy=spot_policy,
+    )
     if token is not None:
         spec["auth_token"] = token
+    if token_secret is not None:
+        spec["auth_token_mysterybox_secret"] = secret_ref(token_secret)
     return {
         "metadata": {"parent_id": project, "name": name},
         "spec": spec,

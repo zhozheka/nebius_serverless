@@ -30,6 +30,11 @@ _ALLOWED = frozenset(
         "env",
         "name",
         "disk",
+        "retries",
+        "working_dir",
+        "secrets",
+        "registry_secret",
+        "spot_policy",
     }
 )
 _ENDPOINT_ALLOWED = frozenset(
@@ -50,6 +55,11 @@ _ENDPOINT_ALLOWED = frozenset(
         "env",
         "name",
         "disk",
+        "token_secret",
+        "working_dir",
+        "secrets",
+        "registry_secret",
+        "spot_policy",
     }
 )
 _PLAIN_TAGS = frozenset(
@@ -237,6 +247,11 @@ def _fields(document: Mapping[object, object]) -> dict[str, object]:
         "env",
         "name",
         "disk",
+        "retries",
+        "working_dir",
+        "secrets",
+        "registry_secret",
+        "spot_policy",
     ):
         if name in document and document[name] is not None:
             fields[name] = document[name]
@@ -287,6 +302,11 @@ def _endpoint_fields(
         "env",
         "name",
         "disk",
+        "token_secret",
+        "working_dir",
+        "secrets",
+        "registry_secret",
+        "spot_policy",
     ):
         if name in document and document[name] is not None:
             fields[name] = document[name]

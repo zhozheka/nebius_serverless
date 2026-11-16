@@ -9,6 +9,7 @@ import json
 import time
 from collections.abc import Mapping
 from datetime import timedelta
+from typing import Any
 
 from .errors import (
     AccessError,
@@ -407,12 +408,7 @@ def _raise_project(exc: object, project_id: str) -> None:
 
 def build_create_request(body: Mapping[str, object]) -> object:
     """Turn the mapped body into ``CreateJobRequest``."""
-    from nebius.api.nebius.ai.v1 import (
-        CreateJobRequest,
-        FollowsSpotPriceSpec,
-        JobSpec,
-        PricingModelSpec,
-    )
+    from nebius.api.nebius.ai.v1 import CreateJobRequest, JobSpec
     from nebius.api.nebius.common.v1 import ResourceMetadata
     from nebius.api.nebius.compute.v1 import DiskSpec as ComputeDisk
 
@@ -445,21 +441,9 @@ def build_create_request(body: Mapping[str, object]) -> object:
         spec_kwargs["args"] = spec["args"]
     if "subnet_id" in spec:
         spec_kwargs["subnet_id"] = spec["subnet_id"]
-    if spec.get("preemptible") is True:
-        spec_kwargs["preemptible"] = True
-        spec_kwargs["pricing_model"] = PricingModelSpec(
-            follows_spot_price=FollowsSpotPriceSpec(),
-        )
-    variables = spec.get("environment_variables")
-    if isinstance(variables, list) and variables:
-        spec_kwargs["environment_variables"] = [
-            JobSpec.EnvironmentVariable(
-                name=item["name"],
-                value=item["value"],
-            )
-            for item in variables
-            if isinstance(item, Mapping)
-        ]
+    if "restart_attempts" in spec:
+        spec_kwargs["restart_attempts"] = int(spec["restart_attempts"])
+    _shared_spec_kwargs(spec, spec_kwargs, JobSpec)
     mounts = spec.get("volumes")
     if isinstance(mounts, list) and mounts:
         spec_kwargs["volumes"] = [
@@ -486,12 +470,7 @@ def build_create_request(body: Mapping[str, object]) -> object:
 
 def build_endpoint_request(body: Mapping[str, object]) -> object:
     """Turn the mapped endpoint body into ``CreateEndpointRequest``."""
-    from nebius.api.nebius.ai.v1 import (
-        CreateEndpointRequest,
-        EndpointSpec,
-        FollowsSpotPriceSpec,
-        PricingModelSpec,
-    )
+    from nebius.api.nebius.ai.v1 import CreateEndpointRequest, EndpointSpec
     from nebius.api.nebius.common.v1 import ResourceMetadata
     from nebius.api.nebius.compute.v1 import DiskSpec as ComputeDisk
 
@@ -534,21 +513,12 @@ def build_endpoint_request(body: Mapping[str, object]) -> object:
         spec_kwargs["subnet_id"] = spec["subnet_id"]
     if "auth_token" in spec:
         spec_kwargs["auth_token"] = spec["auth_token"]
-    if spec.get("preemptible") is True:
-        spec_kwargs["preemptible"] = True
-        spec_kwargs["pricing_model"] = PricingModelSpec(
-            follows_spot_price=FollowsSpotPriceSpec(),
+    token_ref = spec.get("auth_token_mysterybox_secret")
+    if isinstance(token_ref, Mapping):
+        spec_kwargs["auth_token_mysterybox_secret"] = (
+            EndpointSpec.MysteryBoxSecretRef(**token_ref)
         )
-    variables = spec.get("environment_variables")
-    if isinstance(variables, list) and variables:
-        spec_kwargs["environment_variables"] = [
-            EndpointSpec.EnvironmentVariable(
-                name=item["name"],
-                value=item["value"],
-            )
-            for item in variables
-            if isinstance(item, Mapping)
-        ]
+    _shared_spec_kwargs(spec, spec_kwargs, EndpointSpec)
     mounts = spec.get("volumes")
     if isinstance(mounts, list) and mounts:
         spec_kwargs["volumes"] = [
@@ -572,6 +542,60 @@ def build_endpoint_request(body: Mapping[str, object]) -> object:
             name=str(metadata["name"]),
         ),
         spec=EndpointSpec(**spec_kwargs),
+    )
+
+
+def _shared_spec_kwargs(
+    spec: Mapping[str, object],
+    spec_kwargs: dict[str, object],
+    spec_type: Any,
+) -> None:
+    """Map the fields ``JobSpec`` and ``EndpointSpec`` share by name."""
+    from nebius.api.nebius.ai.v1 import (
+        FollowsSpotPriceSpec,
+        PricingModelSpec,
+        SpotPricingPolicySpec,
+    )
+
+    if spec.get("preemptible") is True:
+        spec_kwargs["preemptible"] = True
+        policy = spec.get("spot_pricing_policy")
+        if isinstance(policy, str):
+            spec_kwargs["pricing_model"] = PricingModelSpec(
+                spot_pricing_policy=SpotPricingPolicySpec(id=policy),
+            )
+        else:
+            spec_kwargs["pricing_model"] = PricingModelSpec(
+                follows_spot_price=FollowsSpotPriceSpec(),
+            )
+    if "working_dir" in spec:
+        spec_kwargs["working_dir"] = spec["working_dir"]
+    registry = spec.get("registry_credentials")
+    if isinstance(registry, Mapping):
+        spec_kwargs["registry_credentials"] = spec_type.RegistryCredentials(
+            mysterybox_secret_version=str(
+                registry["mysterybox_secret_version"]
+            ),
+        )
+    variables = spec.get("environment_variables")
+    if isinstance(variables, list) and variables:
+        spec_kwargs["environment_variables"] = [
+            _variable(spec_type, item)
+            for item in variables
+            if isinstance(item, Mapping)
+        ]
+
+
+def _variable(spec_type: Any, item: Mapping[str, object]) -> object:
+    ref = item.get("mysterybox_secret")
+    if isinstance(ref, Mapping):
+        return spec_type.EnvironmentVariable(
+            name=item["name"],
+            mysterybox_secret=spec_type.MysteryBoxSecretRef(**ref),
+        )
+    return spec_type.EnvironmentVariable(
+        name=item["name"],
+        value=item["value"],
     )
 
 

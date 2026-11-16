@@ -142,6 +142,11 @@ ns.Endpoint(
     disk=None,
     profile=None,
     project=None,
+    token_secret=None,
+    working_dir=None,
+    secrets=None,
+    registry_secret=None,
+    spot_policy=None,
 )
 ```
 
@@ -157,17 +162,22 @@ ns.Endpoint(
 | `auth` | no | `"none"` (default) or `"token"`. `"token"` requires one HTTP port, which this contract already requires. Any other value raises `ValidationError`. |
 | `token` | no | Bearer token sent when `auth="token"`. Setting it with `auth="none"` raises `ValidationError`. When omitted, the client generates a random token on each create and sets `Service.token`. The value is left out of `repr`, dry-run descriptions, and exception text. |
 | `subnet_id` | no | Sent when set. Omit it when the project has a single subnet. |
-| `volumes` | no | Mount strings, passed through, same form as `Job`. |
+| `volumes` | no | Mount strings, passed through, same form as `Job`. The `s3://` `:profile` suffix raises `UnsupportedFeature`. |
 | `inject_files` | no | `local_path:container_path` strings, same form and 64 KiB limit as `Job`. Files are read on create. |
-| `env` | no | `dict[str, str]`. Values are sent on create and left out of dry-run descriptions and exception text. |
+| `env` | no | `dict[str, str]`. Values are sent on create and left out of dry-run descriptions and exception text. Use `secrets` for tokens. |
 | `name` | no | Console label (`metadata.name`). When omitted, the client generates `endpoint-` plus 12 hex characters. It is not a lookup key. |
 | `disk` | no | CLI size string, passed through, such as `500Gi`. When omitted, the request uses `250Gi`. |
 | `profile` | no | Nebius SDK profile name. When omitted, the active profile is used. |
 | `project` | no | Project id. Overrides the profile's project. |
+| `token_secret` | no | MysteryBox secret id (`mbsec-…`) or version id (`mbsecver-…`) whose payload has `AUTH_TOKEN`. Sent as `auth_token_mysterybox_secret`. Requires `auth="token"` and cannot be combined with `token`; either mistake raises `ValidationError`. No token is generated, `Service.token` is `None`, and the dry-run description shows `"token": "secret"` with the id. |
+| `working_dir` | no | Container working directory, at most 128 characters. When omitted, the image `WORKDIR` applies. |
+| `secrets` | no | `dict[str, str]` of env name to MysteryBox id: a secret id (`mbsec-…`, latest version) or a version id (`mbsecver-…`). The container gets the payload entry whose key matches the name, or the first entry. Names follow `[A-Za-z_][A-Za-z0-9_]*` and must not repeat an `env` key. Ids are shown in dry-run descriptions; values never reach the client. |
+| `registry_secret` | no | MysteryBox secret version id (`mbsecver-…`) for a private image registry. The payload must have `REGISTRY_USERNAME` and `REGISTRY_PASSWORD`. A secret id (`mbsec-…`) raises `ValidationError`. |
+| `spot_policy` | no | Pricing policy id that caps the spot price. Requires `pricing="spot"`, otherwise `ValidationError`. Sent as `pricing_model.spot_pricing_policy` in place of `follows_spot_price`: the VM is preempted when the spot price exceeds the cap. |
 
-There is no `timeout` parameter. An endpoint has no job deadline. Shared memory follows the job adapter: `16Gi`. It is not a parameter.
+There is no `timeout` or `retries` parameter. An endpoint has no job deadline, and the endpoint API has no restart count. Shared memory follows the job adapter: `16Gi`. It is not a parameter.
 
-After construction these attributes are readable: `command`, `image`, `port`, `gpu`, `platform`, `preset`, `pricing`, `auth`, `token`, `subnet_id`, `volumes`, `inject_files`, `env`, `name`, `disk`, `profile`, `project`. `token` is the value passed in, or `None` when it will be generated. `command` is `None` when the image entrypoint is kept. `env` is a tuple of `(key, value)` pairs.
+After construction these attributes are readable: `command`, `image`, `port`, `gpu`, `platform`, `preset`, `pricing`, `auth`, `token`, `subnet_id`, `volumes`, `inject_files`, `env`, `name`, `disk`, `profile`, `project`, `token_secret`, `working_dir`, `secrets`, `registry_secret`, `spot_policy`. `token` is the value passed in, or `None` when it will be generated or read from `token_secret`. `command` is `None` when the image entrypoint is kept. `env` and `secrets` are tuples of `(key, value)` pairs.
 
 ### `Endpoint.from_yaml`
 
@@ -177,7 +187,7 @@ ns.Endpoint.from_yaml(path) -> Endpoint
 
 Load a schema-version-1 endpoint document. Relative strings inside the document are not expanded.
 
-Allowed keys: `schema_version`, `kind`, `image`, `command`, `port`, `gpu`, `platform`, `preset`, `pricing`, `auth`, `token`, `subnet_id`, `volumes`, `env`, `name`, `disk`.
+Allowed keys: `schema_version`, `kind`, `image`, `command`, `port`, `gpu`, `platform`, `preset`, `pricing`, `auth`, `token`, `subnet_id`, `volumes`, `env`, `name`, `disk`, `token_secret`, `working_dir`, `secrets`, `registry_secret`, `spot_policy`.
 
 `schema_version` must be `1` and `kind` must be `endpoint`. A `kind: job` document is rejected and points at `Job.from_yaml`; `Job.from_yaml` does the same for `kind: endpoint`. `command` may be omitted. When present it is a list of strings. `port` is an integer. `gpu` may be omitted for CPU. `gpu: cpu` is rejected. Unknown keys, duplicate keys, aliases, anchors, tags, merge keys, and a document over 1 MiB are rejected. `token` and `env` values are accepted and then treated like the Python values: sent on create, omitted from dry-run descriptions and exception text.
 

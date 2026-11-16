@@ -15,6 +15,7 @@ from .endpoint_recipe import (
     validate_optional_command,
     validate_port,
     validate_token,
+    validate_token_secret,
 )
 from .errors import Error, UnsupportedFeature
 from .loop import reject_running_loop
@@ -37,7 +38,11 @@ from .recipe import (
     validate_inject_files,
     validate_optional_text,
     validate_pricing,
+    validate_registry_secret,
+    validate_secrets,
+    validate_spot_policy,
     validate_volumes,
+    validate_working_dir,
 )
 from .service import Service
 from .status import Status
@@ -83,19 +88,39 @@ class Endpoint:
         subnet_id: Subnet id, e.g. ``"vpcsubnet-..."``. Only needed
             when the project has more than one subnet.
         volumes: Mount strings ``source:/container/path[:ro|rw]`` or
-            ``s3://bucket:/container/path[:ro|rw]``, e.g.
+            ``s3://bucket:/container/path[:ro|rw]`` (no ``:profile``
+            suffix), e.g.
             ``["s3://my-models:/models:ro"]``. Mode defaults to ``rw``.
         inject_files: ``local_path:/container/path`` strings, e.g.
             ``["./config.yaml:/app/config.yaml"]``. Each file is read on
             ``create`` and must be at most 64 KiB.
-        env: Environment variables, e.g. ``{"HF_TOKEN": "..."}``. Values
-            are hidden from dry-run output and error text.
+        env: Plain environment variables, e.g.
+            ``{"WANDB_MODE": "offline"}``. Values are hidden from dry-run
+            output and error text. Use ``secrets`` for tokens.
         name: Console label. Defaults to ``endpoint-`` plus 12 hex
             chars. It is not a lookup key.
         disk: Boot disk size, e.g. ``"500Gi"``. Defaults to ``"250Gi"``.
         profile: Nebius CLI profile name. Defaults to the active profile.
         project: Project id, e.g. ``"project-..."``. Overrides the
             profile's project.
+        token_secret: MysteryBox secret id or version id whose payload
+            has ``AUTH_TOKEN``. Requires ``auth="token"`` and excludes
+            ``token``. No token is generated and ``Service.token`` is
+            ``None``.
+        working_dir: Container working directory, e.g. ``"/workspace"``.
+            At most 128 characters. Defaults to the image ``WORKDIR``.
+        secrets: Environment variables read from MysteryBox, e.g.
+            ``{"HF_TOKEN": "mbsec-..."}``. Each value is a secret id
+            (``mbsec-``, latest version) or a version id
+            (``mbsecver-``). The variable gets the payload entry whose
+            key matches its name, or the first entry. Names must not
+            repeat ``env``.
+        registry_secret: MysteryBox secret version id (``mbsecver-...``)
+            for a private image registry. The payload must have
+            ``REGISTRY_USERNAME`` and ``REGISTRY_PASSWORD``.
+        spot_policy: Pricing policy id that caps the spot price, e.g.
+            ``"pricingpolicy-..."``. Requires ``pricing="spot"``. The
+            VM is preempted when the spot price goes above the cap.
 
     Example::
 
@@ -113,7 +138,7 @@ class Endpoint:
             gpu="l40s",
             auth="token",
             disk="500Gi",
-            env={"HF_TOKEN": "..."},
+            secrets={"HF_TOKEN": "mbsec-..."},  # read from MysteryBox
             name="qwen-tiny",
         )
         print(endpoint.create(dry_run=True))  # inspect the request only
@@ -143,6 +168,11 @@ class Endpoint:
         disk: str | None = None,
         profile: str | None = None,
         project: str | None = None,
+        token_secret: str | None = None,
+        working_dir: str | None = None,
+        secrets: Mapping[str, str] | None = None,
+        registry_secret: str | None = None,
+        spot_policy: str | None = None,
     ) -> None:
         op = _OPERATION
         self.command = validate_optional_command(command)
@@ -160,6 +190,9 @@ class Endpoint:
         )
         self.auth = validate_auth(auth)
         self.token = validate_token(token, self.auth)
+        self.token_secret = validate_token_secret(
+            token_secret, self.auth, self.token
+        )
         self.subnet_id = validate_optional_text(
             subnet_id, "subnet_id", operation=op
         )
@@ -174,6 +207,14 @@ class Endpoint:
         )
         self.profile = validate_optional_text(profile, "profile", operation=op)
         self.project = validate_optional_text(project, "project", operation=op)
+        self.working_dir = validate_working_dir(working_dir, operation=op)
+        self.secrets = validate_secrets(secrets, self.env, operation=op)
+        self.registry_secret = validate_registry_secret(
+            registry_secret, operation=op
+        )
+        self.spot_policy = validate_spot_policy(
+            spot_policy, self.pricing, operation=op
+        )
 
     def __repr__(self) -> str:
         token = "" if self.token is None else ", token=<hidden>"
@@ -320,12 +361,17 @@ class Endpoint:
             env_keys=[key for key, _value in self.env],
             name=self.name,
             disk=self.disk,
+            token_secret=self.token_secret,
+            working_dir=self.working_dir,
+            secrets=self.secrets,
+            registry_secret=self.registry_secret,
+            spot_policy=self.spot_policy,
         )
         if dry_run:
             return description
         chosen = transport or _sdk_transport(self.profile, project_id)
         token = None
-        if self.auth == "token":
+        if self.auth == "token" and self.token_secret is None:
             token = self.token or generate_token()
         body = endpoint_request_body(
             command=self.command,
@@ -342,6 +388,11 @@ class Endpoint:
             env=self.env,
             name=self.name,
             disk=self.disk,
+            token_secret=self.token_secret,
+            working_dir=self.working_dir,
+            secrets=self.secrets,
+            registry_secret=self.registry_secret,
+            spot_policy=self.spot_policy,
         )
         started = time.perf_counter()
         try:

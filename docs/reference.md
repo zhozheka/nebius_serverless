@@ -84,6 +84,11 @@ ns.Job(
     disk=None,
     profile=None,
     project=None,
+    retries=0,
+    working_dir=None,
+    secrets=None,
+    registry_secret=None,
+    spot_policy=None,
 )
 ```
 
@@ -97,17 +102,22 @@ ns.Job(
 | `timeout` | yes | Job deadline: a duration string such as `"1h"`, a number of seconds, or a `timedelta`. Normalized to seconds. Below 1 hour or above 168 hours raises `ValidationError`. Nothing is rounded or clamped. |
 | `pricing` | no | `"on-demand"` (default) or `"spot"`. `"spot"` is preemptible and follows the current price. `"spot"` on CPU raises `UnsupportedFeature`. Any other value raises `ValidationError`. |
 | `subnet_id` | no | Sent when set. Omit it when the project has a single subnet. |
-| `volumes` | no | Mount strings, passed through: `source:container_path[:mode]` or `s3://bucket:/container_path[:mode[:profile]]`. Mode is `ro` or `rw` (default `rw`). The client does not verify the objects. |
+| `volumes` | no | Mount strings, passed through: `source:container_path[:mode]` or `s3://bucket:/container_path[:mode]`. Mode is `ro` or `rw` (default `rw`). An `s3://` string with a fourth `:profile` part raises `UnsupportedFeature`. The client does not verify the objects. |
 | `inject_files` | no | CLI [`--inject-file`](https://docs.nebius.com/cli/reference/ai/create) strings: `local_path:container_path`. Each local file is read on create (not on `Job` construction), sent as container content, and must be at most 64 KiB. Dry-run lists the strings and does not read the files. |
-| `env` | no | `dict[str, str]`. Values are sent on create and left out of dry-run descriptions and exception text. |
+| `env` | no | `dict[str, str]`. Values are sent on create and left out of dry-run descriptions and exception text. Use `secrets` for tokens. |
 | `name` | no | Console label (`metadata.name`). When omitted, the client generates `job-` plus 12 hex characters. It is not a lookup key. |
 | `disk` | no | CLI size string, passed through, such as `500Gi`. When omitted, the request uses `250Gi`. |
 | `profile` | no | Nebius SDK profile name. When omitted, the active profile is used. |
 | `project` | no | Project id. Overrides the profile's project. |
+| `retries` | no | Non-negative integer, sent as `restart_attempts`: how many times Nebius restarts the job after it fails. `0` (default) leaves the field unset, so the service default applies. A negative number or a bool raises `ValidationError`. |
+| `working_dir` | no | Container working directory, at most 128 characters. When omitted, the image `WORKDIR` applies. |
+| `secrets` | no | `dict[str, str]` of env name to MysteryBox id: a secret id (`mbsec-…`, latest version) or a version id (`mbsecver-…`). The container gets the payload entry whose key matches the name, or the first entry. Names follow `[A-Za-z_][A-Za-z0-9_]*` and must not repeat an `env` key. Ids are shown in dry-run descriptions; values never reach the client. |
+| `registry_secret` | no | MysteryBox secret version id (`mbsecver-…`) for a private image registry. The payload must have `REGISTRY_USERNAME` and `REGISTRY_PASSWORD`. A secret id (`mbsec-…`) raises `ValidationError`. |
+| `spot_policy` | no | Pricing policy id that caps the spot price. Requires `pricing="spot"`, otherwise `ValidationError`. Sent as `pricing_model.spot_pricing_policy` in place of `follows_spot_price`: the VM is preempted when the spot price exceeds the cap. |
 
 Shared memory is always `16Gi`. It is not a parameter.
 
-After construction these attributes are readable: `command`, `image`, `gpu`, `platform`, `preset`, `timeout_seconds`, `pricing`, `subnet_id`, `volumes`, `inject_files`, `env`, `name`, `disk`, `profile`, `project`. `env` is a tuple of `(key, value)` pairs. `timeout_seconds` is the normalized deadline.
+After construction these attributes are readable: `command`, `image`, `gpu`, `platform`, `preset`, `timeout_seconds`, `pricing`, `subnet_id`, `volumes`, `inject_files`, `env`, `name`, `disk`, `profile`, `project`, `retries`, `working_dir`, `secrets`, `registry_secret`, `spot_policy`. `env` and `secrets` are tuples of `(key, value)` pairs. `timeout_seconds` is the normalized deadline.
 
 ### `Job.from_yaml`
 
@@ -127,7 +137,7 @@ timeout: 1h
 pricing: on-demand
 ```
 
-Allowed keys: `schema_version`, `kind`, `image`, `command`, `gpu`, `platform`, `preset`, `timeout`, `pricing`, `subnet_id`, `volumes`, `env`, `name`, `disk`.
+Allowed keys: `schema_version`, `kind`, `image`, `command`, `gpu`, `platform`, `preset`, `timeout`, `pricing`, `subnet_id`, `volumes`, `env`, `name`, `disk`, `retries`, `working_dir`, `secrets`, `registry_secret`, `spot_policy`.
 
 `schema_version` must be `1` and `kind` must be `job`. `command` is a list of strings. `gpu` may be omitted for CPU. `gpu: cpu` is rejected. A document whose kind or `execution` is `function` raises `UnsupportedFeature`. Unknown keys, duplicate keys, aliases, anchors, tags, merge keys, and a document over 1 MiB are rejected.
 
@@ -157,7 +167,7 @@ job.create(
 
 `create(dry_run=True)` builds the request, returns that description, and does not call create. Project and region come from `project=` / `region=` when passed, otherwise from the active SDK profile (`profile=` on the `Job` selects it). When the project id is known and the profile does not name a region, the region is `spec.region` from IAM v2 `ProjectService.get`. That read is not a job create. A missing or ambiguous project, or a project with no region, raises `ValidationError` before create.
 
-The description includes `image`, `command`, `args` when present, `project`, `region`, `platform`, `preset`, `timeout` (seconds), `pricing`, `subnet_id` when set, `volumes` when set, `inject_files` when set, `env` (key names only), `name`, `disk`, and `shm`. Env values and inject-file contents are not included.
+The description includes `image`, `command`, `args` when present, `project`, `region`, `platform`, `preset`, `timeout` (seconds), `pricing`, `subnet_id` when set, `volumes` when set, `inject_files` when set, `env` (key names only), `name`, `disk`, `shm`, and, when set, `retries`, `working_dir`, `secrets` (env name to MysteryBox id), `registry_secret`, and `spot_policy`. Env values, secret values, and inject-file contents are not included.
 
 `region` is the project region used to resolve a `gpu` alias. Pass it to skip the project lookup. `project` on this call overrides `Job.project`.
 
