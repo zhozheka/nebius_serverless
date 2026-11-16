@@ -114,7 +114,7 @@ A runnable version of this recipe, which also polls `/v1/models`, sends one chat
 
 Constructing an `Endpoint`, loading YAML, or importing the package does not authenticate, upload, or create. A second `create()` starts another endpoint and returns another `Service`. Each one bills until its own `delete`.
 
-Synchronous methods are the script API. Inside a running event loop they raise `ValidationError` and name the awaited twin (`create_async`, `get_async`, `wait_async`, `delete_async`, `endpoints.get_async`). Cancelling an await does not delete the endpoint. Only `delete` / `delete_async` requests deletion.
+Synchronous methods are the script API. Inside a running event loop they raise `ValidationError` and name the awaited twin (`create_async`, `get_async`, `wait_async`, `stop_async`, `delete_async`, `endpoints.get_async`). Cancelling an await does not delete the endpoint. Only `delete` / `delete_async` requests deletion.
 
 This package does not stream endpoint logs. Log access stays on the CLI and the web console.
 
@@ -255,6 +255,14 @@ Ready means `status.state` is `RUNNING` and `url` is set. `ERROR` and `STOPPED` 
 
 This wait does not request the application's HTTP route. A server that is still loading a model can be `RUNNING` with a URL and still refuse traffic.
 
+### `Service.stop`
+
+```python
+service.stop(*, quiet=False) -> dict
+```
+
+Requests a stop and returns `{"id": ..., "resource_id": ...}` when the request is accepted. The endpoint keeps its id and configuration; only `delete` removes it. The state passes through `STOPPING` to `STOPPED`; poll `get` to see it. Do not use `wait` for this: right after the stop is accepted the state can still be `RUNNING` with a URL, and `wait` returns on that.
+
 ### `Service.delete`
 
 ```python
@@ -278,6 +286,7 @@ Prints the last fetched record on stdout, including the managed URL, image, plat
 ```python
 await service.get_async(*, quiet=False)
 await service.wait_async(timeout=None, *, quiet=False)
+await service.stop_async(*, quiet=False)
 await service.delete_async(*, quiet=False)
 ```
 

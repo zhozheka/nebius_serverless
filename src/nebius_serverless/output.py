@@ -41,6 +41,11 @@ _LOG_FACT = {
         "Cancel accepted",
         "cancel_accepted",
     ),
+    "stop_accepted": (
+        logging.INFO,
+        "Stop accepted",
+        "stop_accepted",
+    ),
     "delete_accepted": (
         logging.INFO,
         "Delete accepted",
@@ -179,6 +184,9 @@ class Progress:
             return
         if fact.kind == "cancel_accepted":
             self._write(self._visible(_cancel_parts(fact.job_id)))
+            return
+        if fact.kind == "stop_accepted":
+            self._write(self._visible(_stop_parts(fact.job_id)))
             return
         if fact.kind == "delete_accepted":
             self._write(self._visible(_delete_parts(fact.job_id)))
@@ -1006,6 +1014,13 @@ def _cancel_parts(job_id: str) -> list[tuple[str, str]]:
     return [
         ("Cancel accepted for ", "dim"),
         (plain_text(job_id), "bold cyan"),
+    ]
+
+
+def _stop_parts(endpoint_id: str) -> list[tuple[str, str]]:
+    return [
+        ("Stop accepted for ", "dim"),
+        (plain_text(endpoint_id), "bold cyan"),
     ]
 
 

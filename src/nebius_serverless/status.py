@@ -9,6 +9,7 @@ Kind = Literal[
     "transition",
     "terminal",
     "cancel_accepted",
+    "stop_accepted",
     "delete_accepted",
     "local_timeout",
 ]
@@ -19,9 +20,9 @@ class Status:
     """A progress fact with no I/O and no subclass per event.
 
     ``kind`` is one of ``submitted``, ``snapshot``, ``transition``,
-    ``terminal``, ``cancel_accepted``, ``delete_accepted``, or
-    ``local_timeout``. ``noun`` is ``job`` or ``endpoint``. ``job_id``
-    holds the resource id for either.
+    ``terminal``, ``cancel_accepted``, ``stop_accepted``,
+    ``delete_accepted``, or ``local_timeout``. ``noun`` is ``job`` or
+    ``endpoint``. ``job_id`` holds the resource id for either.
     """
 
     kind: Kind

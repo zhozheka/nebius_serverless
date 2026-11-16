@@ -67,7 +67,9 @@ class FakeClock:
 
 
 class FakeEndpointTransport:
-    """Records endpoint create, get, and delete. Does not contact Nebius.
+    """Records endpoint create, get, stop, and delete.
+
+    Does not contact Nebius.
 
     ``states`` and ``urls`` are consumed one per get, and the last entry
     repeats.
@@ -76,6 +78,7 @@ class FakeEndpointTransport:
     def __init__(self) -> None:
         self.bodies: list[dict[str, object]] = []
         self.gets: list[str] = []
+        self.stops: list[str] = []
         self.deletes: list[str] = []
         self.drop_id = False
         self.failure: str | None = None
@@ -112,6 +115,10 @@ class FakeEndpointTransport:
             "spec": {"image": "vllm/vllm-openai:v0.19.1"},
             "status": status,
         }
+
+    def stop(self, endpoint_id: str) -> dict[str, object]:
+        self.stops.append(endpoint_id)
+        return {"id": endpoint_id, "resource_id": endpoint_id}
 
     def delete(self, endpoint_id: str) -> dict[str, object]:
         self.deletes.append(endpoint_id)

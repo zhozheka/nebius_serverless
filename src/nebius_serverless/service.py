@@ -3,6 +3,7 @@
 import sys
 import threading
 import time
+from typing import Literal
 
 from .errors import Error, ValidationError, WaitTimeout, recovery_for
 from .loop import reject_running_loop
@@ -67,7 +68,8 @@ class Service:
     You get a ``Service`` from ``Endpoint.create()`` or
     ``endpoints.get()``. Property reads do not perform I/O. ``wait``
     polls until the endpoint is ready or will not become ready. Nothing
-    here deletes the endpoint except ``delete``.
+    here stops the endpoint except ``stop``, and nothing deletes it
+    except ``delete``.
     """
 
     def __init__(
@@ -208,6 +210,42 @@ class Service:
             noun="endpoint",
         )
 
+    def stop(self, *, quiet: bool = False) -> dict[str, object]:
+        """Request a stop and return when the request is accepted.
+
+        The endpoint is kept, so it can be started again or deleted.
+        The state passes through ``STOPPING`` to ``STOPPED``; poll
+        ``get`` to see it. The payload does not claim it has stopped.
+        """
+        reject_running_loop("stop_async")
+
+        def work(progress: Progress) -> dict[str, object]:
+            return self._present_accepted("stop", progress)
+
+        return call_progress(
+            quiet=quiet,
+            logger_name=_LOG,
+            work=work,
+            noun="endpoint",
+        )
+
+    async def stop_async(
+        self,
+        *,
+        quiet: bool = False,
+    ) -> dict[str, object]:
+        """Await the same stop request as ``stop``."""
+
+        def work(progress: Progress) -> dict[str, object]:
+            return self._present_accepted("stop", progress)
+
+        return await call_progress_async(
+            quiet=quiet,
+            logger_name=_LOG,
+            work=work,
+            noun="endpoint",
+        )
+
     def delete(self, *, quiet: bool = False) -> dict[str, object]:
         """Request deletion and return when the request is accepted.
 
@@ -217,7 +255,7 @@ class Service:
         reject_running_loop("delete_async")
 
         def work(progress: Progress) -> dict[str, object]:
-            return self._present_delete(progress)
+            return self._present_accepted("delete", progress)
 
         return call_progress(
             quiet=quiet,
@@ -234,7 +272,7 @@ class Service:
         """Await the same deletion request as ``delete``."""
 
         def work(progress: Progress) -> dict[str, object]:
-            return self._present_delete(progress)
+            return self._present_accepted("delete", progress)
 
         return await call_progress_async(
             quiet=quiet,
@@ -290,10 +328,16 @@ class Service:
         )
         return record
 
-    def _present_delete(self, progress: Progress) -> dict[str, object]:
+    def _present_accepted(
+        self,
+        verb: Literal["stop", "delete"],
+        progress: Progress,
+    ) -> dict[str, object]:
         started = time.perf_counter()
+        transport = self._transport
+        call = transport.stop if verb == "stop" else transport.delete
         try:
-            payload = self._transport.delete(self._id)
+            payload = call(self._id)
         except Error as exc:
             log_transport(
                 progress,
@@ -312,7 +356,7 @@ class Service:
         )
         report(
             Status(
-                kind="delete_accepted",
+                kind="stop_accepted" if verb == "stop" else "delete_accepted",
                 job_id=self._id,
                 duration_ms=duration_ms,
                 noun=_NOUN,

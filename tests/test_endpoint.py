@@ -389,6 +389,15 @@ def test_delete_requests_deletion_once() -> None:
     assert not hasattr(service, "cancel")
 
 
+def test_stop_requests_a_stop_once_and_does_not_delete() -> None:
+    fake = FakeEndpointTransport()
+    service = _create(fake)
+    payload = service.stop()
+    assert payload == {"id": "endpoint-1", "resource_id": "endpoint-1"}
+    assert fake.stops == ["endpoint-1"]
+    assert fake.deletes == []
+
+
 def test_endpoints_get_reloads_without_creating() -> None:
     fake = FakeEndpointTransport()
     service = _create(fake, auth="token")
@@ -426,11 +435,13 @@ def test_progress_names_the_endpoint(
     fake.states = ["STARTING", "RUNNING"]
     service = _create(fake, name="qwen-tiny")
     service.wait()
+    service.stop()
     service.delete()
     text = stream.getvalue()
     assert "Submitted endpoint endpoint-1 qwen-tiny" in text
     assert "endpoint-1 RUNNING" in text
     assert "https://ep.example.nebius.cloud" in text
+    assert "Stop accepted for endpoint-1" in text
     assert "Delete accepted for endpoint-1" in text
     assert "jobs.get" not in text
 
@@ -460,6 +471,8 @@ def test_sync_calls_inside_a_loop_name_the_twin() -> None:
             _endpoint().create(dry_run=True, region="eu-north1", project="p")
         with pytest.raises(ns.ValidationError, match="wait_async"):
             service.wait()
+        with pytest.raises(ns.ValidationError, match="stop_async"):
+            service.stop()
         with pytest.raises(ns.ValidationError, match="delete_async"):
             service.delete()
         with pytest.raises(
@@ -468,6 +481,7 @@ def test_sync_calls_inside_a_loop_name_the_twin() -> None:
             ns.endpoints.get(service.id, transport=fake)
 
     asyncio.run(inside())
+    assert fake.stops == []
     assert fake.deletes == []
 
 
@@ -488,9 +502,11 @@ def test_awaited_twins(monkeypatch: pytest.MonkeyPatch) -> None:
         assert (await service.get_async())["status"]["state"] == "RUNNING"
         loaded = await ns.endpoints.get_async(service.id, transport=fake)
         assert loaded.id == service.id
+        await service.stop_async()
         await service.delete_async()
 
     asyncio.run(flow())
+    assert fake.stops == ["endpoint-1"]
     assert fake.deletes == ["endpoint-1"]
 
 
@@ -597,6 +613,7 @@ class _Pending:
 class _FakeEndpointClient:
     def __init__(self) -> None:
         self.created: list[object] = []
+        self.stopped: list[str] = []
         self.deleted: list[str] = []
 
     def create(self, request: object) -> _Pending:
@@ -617,6 +634,10 @@ class _FakeEndpointClient:
                 ),
             )
         )
+
+    def stop(self, request: object) -> _Pending:
+        self.stopped.append(request.id)
+        return _Pending(_Operation(request.id))
 
     def delete(self, request: object) -> _Pending:
         self.deleted.append(request.id)
@@ -640,6 +661,8 @@ def test_sdk_endpoint_transport_round_trip(
     assert "auth_token" not in record["spec"]
     assert TOKEN not in repr(record)
     assert service.url == "https://ep-sdk-1.nebius.cloud"
+    assert service.stop() == {"id": "ep-sdk-1", "resource_id": "ep-sdk-1"}
+    assert client.stopped == ["ep-sdk-1"]
     assert service.delete() == {
         "id": "ep-sdk-1",
         "resource_id": "ep-sdk-1",

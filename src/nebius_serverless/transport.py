@@ -1,4 +1,4 @@
-"""Create, get, cancel, and delete behind a small transport object."""
+"""Create, get, cancel, stop, and delete behind a small transport object."""
 
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -49,6 +49,9 @@ class EndpointTransport(Protocol):
 
     def get(self, endpoint_id: str) -> dict[str, object]:
         """Fetch one endpoint."""
+
+    def stop(self, endpoint_id: str) -> dict[str, object]:
+        """Request a stop once."""
 
     def delete(self, endpoint_id: str) -> dict[str, object]:
         """Request deletion once."""

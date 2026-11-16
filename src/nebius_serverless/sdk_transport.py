@@ -9,7 +9,7 @@ import json
 import time
 from collections.abc import Mapping
 from datetime import timedelta
-from typing import Any
+from typing import Any, Literal
 
 from .errors import (
     AccessError,
@@ -156,9 +156,9 @@ class SdkTransport(_SdkSession):
 
 
 class SdkEndpointTransport(_SdkSession):
-    """Create, get, and delete through ``EndpointServiceClient``.
+    """Create, get, stop, and delete through ``EndpointServiceClient``.
 
-    One SDK instance is kept for later get and delete.
+    One SDK instance is kept for later get, stop, and delete.
     """
 
     def create(self, body: Mapping[str, object]) -> CreateResult:
@@ -231,35 +231,58 @@ class SdkEndpointTransport(_SdkSession):
             spec.pop("auth_token", None)
         return payload
 
+    def stop(self, endpoint_id: str) -> dict[str, object]:
+        """Ask Nebius to stop. Return when the request is accepted.
+
+        This does not wait for the state to reach ``STOPPED``. The
+        endpoint stays and can be started again or deleted.
+        """
+        return self._request_once(endpoint_id, "stop")
+
     def delete(self, endpoint_id: str) -> dict[str, object]:
         """Ask Nebius to delete. Return when the request is accepted.
 
         This does not wait for the machine to stop.
         """
+        return self._request_once(endpoint_id, "delete")
+
+    def _request_once(
+        self,
+        endpoint_id: str,
+        verb: Literal["stop", "delete"],
+    ) -> dict[str, object]:
         try:
             from nebius.aio.service_error import RequestError
-            from nebius.api.nebius.ai.v1 import DeleteEndpointRequest
+            from nebius.api.nebius.ai.v1 import (
+                DeleteEndpointRequest,
+                StopEndpointRequest,
+            )
         except ImportError:
             raise TransportError(
-                "The Nebius SDK is required to delete an endpoint.",
-                operation="delete",
+                f"The Nebius SDK is required to {verb} an endpoint.",
+                operation=verb,
                 run_id=endpoint_id,
             ) from None
         try:
-            operation = self._client().delete(
-                DeleteEndpointRequest(id=endpoint_id)
-            ).wait()
+            client = self._client()
+            if verb == "stop":
+                pending = client.stop(StopEndpointRequest(id=endpoint_id))
+            else:
+                pending = client.delete(
+                    DeleteEndpointRequest(id=endpoint_id)
+                )
+            operation = pending.wait()
         except RequestError as exc:
             _raise_call(
                 exc,
-                operation="delete",
+                operation=verb,
                 job_id=endpoint_id,
                 noun="endpoint",
             )
         except Exception as exc:
             raise TransportError(
-                f"The delete call failed for endpoint {endpoint_id}.",
-                operation="delete",
+                f"The {verb} call failed for endpoint {endpoint_id}.",
+                operation=verb,
                 run_id=endpoint_id,
                 request_id=exposed_request_id(exc),
                 recovery=recovery_for(TransportError.code, "endpoint"),
