@@ -55,6 +55,72 @@ class Endpoint:
     ``https://`` URL. Constructing an ``Endpoint``, loading YAML, or
     importing the package does not authenticate, upload, or create.
     Each created endpoint bills until its own ``delete``.
+
+    Args:
+        command: Optional list of strings that overrides the image
+            entrypoint, e.g. ``["bash", "-c", "vllm serve ..."]``.
+            ``None`` (default) keeps the entrypoint. The first item is
+            the container command; the rest are POSIX-quoted into one
+            ``args`` string. A shell string is rejected.
+        image: ``name:tag`` or ``registry/path@sha256:<digest>``, e.g.
+            ``"vllm/vllm-openai:v0.19.1"``. Sent unchanged.
+        port: Container HTTP port, 1 to 65535, e.g. ``8000``. Served on
+            a managed ``https://`` URL (``Service.url``).
+        gpu: GPU alias such as ``"h100"``, ``"h200"``, ``"b200"``,
+            ``"b300"``, ``"l40s"`` or ``"rtx"``. Picks the smallest
+            one-GPU preset in the project region. Omit it for CPU.
+        platform: Explicit platform id, e.g. ``"gpu-l40s-a"``. Overrides
+            ``gpu``.
+        preset: Explicit preset id, e.g. ``"1gpu-8vcpu-32gb"``. When
+            omitted, the smallest preset for the platform is used.
+        pricing: ``"on-demand"`` (default) or ``"spot"``. Spot is
+            preemptible and not available on CPU.
+        auth: ``"none"`` (default, public URL) or ``"token"`` (bearer
+            token required).
+        token: Bearer token for ``auth="token"``. When omitted, a random
+            token is generated on each ``create`` and returned as
+            ``Service.token``. Setting it with ``auth="none"`` raises.
+        subnet_id: Subnet id, e.g. ``"vpcsubnet-..."``. Only needed
+            when the project has more than one subnet.
+        volumes: Mount strings ``source:/container/path[:ro|rw]`` or
+            ``s3://bucket:/container/path[:ro|rw]``, e.g.
+            ``["s3://my-models:/models:ro"]``. Mode defaults to ``rw``.
+        inject_files: ``local_path:/container/path`` strings, e.g.
+            ``["./config.yaml:/app/config.yaml"]``. Each file is read on
+            ``create`` and must be at most 64 KiB.
+        env: Environment variables, e.g. ``{"HF_TOKEN": "..."}``. Values
+            are hidden from dry-run output and error text.
+        name: Console label. Defaults to ``endpoint-`` plus 12 hex
+            chars. It is not a lookup key.
+        disk: Boot disk size, e.g. ``"500Gi"``. Defaults to ``"250Gi"``.
+        profile: Nebius CLI profile name. Defaults to the active profile.
+        project: Project id, e.g. ``"project-..."``. Overrides the
+            profile's project.
+
+    Example::
+
+        import nebius_serverless as ns
+
+        endpoint = ns.Endpoint(
+            command=[
+                "bash",
+                "-c",
+                "python3 -m vllm.entrypoints.openai.api_server "
+                "--model Qwen/Qwen3-0.6B --host 0.0.0.0 --port 8000",
+            ],
+            image="vllm/vllm-openai:v0.19.1",
+            port=8000,
+            gpu="l40s",
+            auth="token",
+            disk="500Gi",
+            env={"HF_TOKEN": "..."},
+            name="qwen-tiny",
+        )
+        print(endpoint.create(dry_run=True))  # inspect the request only
+        service = endpoint.create()
+        service.wait()
+        print(service.url, service.token)
+        service.delete()  # stops billing
     """
 
     def __init__(

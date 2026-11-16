@@ -49,6 +49,69 @@ class Job:
     Constructing a ``Job``, loading YAML, or importing the package does
     not authenticate, upload, or create. The Nebius SDK is imported on
     the call that needs a profile or a live create.
+
+    Args:
+        command: Nonempty list of strings, e.g. ``["python", "train.py",
+            "--epochs", "3"]``. The first item is the container command;
+            the rest are POSIX-quoted into one ``args`` string. A shell
+            string is rejected; wrap shell syntax as
+            ``["bash", "-lc", "a && b"]``.
+        image: ``name:tag`` or ``registry/path@sha256:<digest>``, e.g.
+            ``"pytorch/pytorch:2.6.0-cuda12.6-cudnn9-runtime"``. Sent
+            unchanged.
+        gpu: GPU alias such as ``"h100"``, ``"h200"``, ``"b200"``,
+            ``"b300"``, ``"l40s"`` or ``"rtx"``. Picks the smallest
+            one-GPU preset in the project region. Omit it for CPU.
+        platform: Explicit platform id, e.g. ``"gpu-h100-sxm"``.
+            Overrides ``gpu``.
+        preset: Explicit preset id, e.g. ``"1gpu-16vcpu-200gb"``. When
+            omitted, the smallest preset for the platform is used.
+        timeout: Required job deadline: ``"1h"``, ``"24h"``, seconds
+            (``3600``), or a ``timedelta``. Must be 1 to 168 hours.
+        pricing: ``"on-demand"`` (default) or ``"spot"``. Spot is
+            preemptible and not available on CPU.
+        subnet_id: Subnet id, e.g. ``"vpcsubnet-..."``. Only needed
+            when the project has more than one subnet.
+        volumes: Mount strings ``source:/container/path[:ro|rw]`` or
+            ``s3://bucket:/container/path[:ro|rw]``, e.g.
+            ``["s3://my-data:/workspace/data:ro"]``. Mode defaults to
+            ``rw``.
+        inject_files: ``local_path:/container/path`` strings, e.g.
+            ``["./config.yaml:/app/config.yaml"]``. Each file is read on
+            ``create`` and must be at most 64 KiB.
+        env: Environment variables, e.g. ``{"HF_TOKEN": "..."}``. Values
+            are hidden from dry-run output and error text.
+        name: Console label. Defaults to ``job-`` plus 12 hex chars.
+            It is not a lookup key.
+        disk: Boot disk size, e.g. ``"500Gi"``. Defaults to ``"250Gi"``.
+        profile: Nebius CLI profile name. Defaults to the active profile.
+        project: Project id, e.g. ``"project-..."``. Overrides the
+            profile's project.
+
+    Shared memory is always 16 GiB.
+
+    Example::
+
+        import nebius_serverless as ns
+
+        job = ns.Job(
+            ["bash", "-lc", "axolotl train /workspace/data/config.yaml"],
+            image="docker.io/axolotlai/axolotl:main-20260309-py3.11-cu128-2.9.1",
+            gpu="h100",
+            pricing="spot",
+            timeout="24h",
+            disk="500Gi",
+            volumes=[
+                "s3://axolotl-data:/workspace/data:ro",
+                "s3://axolotl-artifacts:/workspace/artifacts:rw",
+            ],
+            env={"WANDB_MODE": "offline"},
+            name="axolotl-lora",
+        )
+        print(job.create(dry_run=True))  # inspect the request only
+        run = job.create()
+        run.wait()
+        run.display()
     """
 
     def __init__(
