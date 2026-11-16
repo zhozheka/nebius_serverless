@@ -18,7 +18,7 @@ from .output import (
     log_transport,
     report,
 )
-from .profile import load_profile
+from .profile import resolve_location
 from .recipe import (
     check_identity,
     describe,
@@ -193,7 +193,7 @@ class Job:
         transport: Transport | None,
         progress: Progress,
     ) -> Run | dict[str, object]:
-        project_id, region_id = _location(
+        project_id, region_id = resolve_location(
             profile=self.profile,
             project=project if project is not None else self.project,
             region=region,
@@ -281,27 +281,6 @@ class Job:
             transport=chosen,
             create_state=result.state,
         )
-
-
-def _location(
-    *,
-    profile: str | None,
-    project: str | None,
-    region: str | None,
-) -> tuple[str, str]:
-    project_id = project
-    region_id = region
-    if project_id is None or region_id is None:
-        loaded_project, loaded_region = load_profile(profile)
-        if project_id is None:
-            project_id = loaded_project
-        if region_id is None:
-            region_id = loaded_region
-    if region_id is None:
-        from .sdk_transport import project_region
-
-        region_id = project_region(profile, project_id)
-    return project_id, region_id
 
 
 def _sdk_transport(profile: str | None, project: str) -> Transport:

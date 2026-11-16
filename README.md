@@ -1,6 +1,6 @@
 # Nebius Serverless Jobs
 
-Python client for Nebius Serverless AI Jobs.
+Python client for Nebius Serverless AI Jobs and Endpoints.
 
 ## Installation
 
@@ -62,10 +62,30 @@ run = job.create()
 
 `create(dry_run=True)` returns the create request and does not create a job. The example scripts call `create()` and use the active profile.
 
+## Endpoints
+
+An endpoint is a container that stays up and answers on a managed `https://` URL. It bills until `delete`. `ns.Endpoint` is the recipe, `Service` is the created endpoint, and `ns.endpoints.get(id)` reloads one. GPU aliases, pricing, volumes, env, profiles, progress, and errors work as they do for jobs.
+
+```python
+endpoint = ns.Endpoint(
+    image="vllm/vllm-openai:v0.19.1",
+    command=["bash", "-c", "vllm serve Qwen/Qwen3-0.6B --port 8000"],
+    gpu="l40s",
+    port=8000,
+    auth="token",
+)
+service = endpoint.create()
+service.wait()                  # RUNNING with a URL; the model may still be loading
+print(service.url, service.token)
+service.delete()
+```
+
+`command` is optional and keeps the image entrypoint when omitted. With `auth="token"` and no `token=`, a random bearer token is generated on create. `Endpoint.from_yaml` loads a `kind: endpoint` document. [`examples/endpoint_quickstart.py`](examples/endpoint_quickstart.py) serves a model, calls it, and deletes it. The full surface is in [docs/endpoints.md](docs/endpoints.md).
+
 ## Documentation
 
 - [docs/reference.md](docs/reference.md) — classes and methods on the current jobs surface
 - [docs/examples.md](docs/examples.md) — worked examples for the scripts under `examples/`
-- [docs/endpoints.md](docs/endpoints.md) — endpoint proposal (30 October 2026). The jobs surface in the reference is what the package implements
-- [docs/decorators.md](docs/decorators.md) — `@app.job` and `@app.endpoint` proposal (30 October 2026). The jobs surface in the reference is what the package implements
+- [docs/endpoints.md](docs/endpoints.md) — `Endpoint`, `Service`, and `endpoints`
+- [docs/decorators.md](docs/decorators.md) — `@app.job` and `@app.endpoint` proposal (30 October 2026). Not implemented
 - [examples/benchmark/sdk-comparison.md](examples/benchmark/sdk-comparison.md) — Python SDK comparison of this client, the official Nebius SDK, Modal, and RunPod

@@ -52,6 +52,33 @@ def load_profile(
     return project, region
 
 
+def resolve_location(
+    *,
+    profile: str | None,
+    project: str | None,
+    region: str | None,
+) -> tuple[str, str]:
+    """Return ``(project_id, region)`` for one create.
+
+    Explicit values win. Otherwise the SDK profile supplies them, and a
+    profile without a region falls back to the project's
+    ``spec.region``.
+    """
+    project_id = project
+    region_id = region
+    if project_id is None or region_id is None:
+        loaded_project, loaded_region = load_profile(profile)
+        if project_id is None:
+            project_id = loaded_project
+        if region_id is None:
+            region_id = loaded_region
+    if region_id is None:
+        from .sdk_transport import project_region
+
+        region_id = project_region(profile, project_id)
+    return project_id, region_id
+
+
 def _region_of(config: object) -> str | None:
     profile = getattr(config, "_profile", {})
     if not isinstance(profile, dict):

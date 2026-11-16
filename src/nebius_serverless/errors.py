@@ -1,4 +1,4 @@
-"""Errors for the cloud Jobs client.
+"""Errors for the cloud Jobs and Endpoints client.
 
 They carry identity, never env values or tokens. ``code`` is an SDK
 category, not a backend reason code. ``request_id`` is set only when
@@ -20,6 +20,18 @@ _CONFLICT_RECOVERY = (
     "Do not send a second create."
 )
 _WAIT_RECOVERY = "Reload it with jobs.get(id), or call cancel."
+
+ENDPOINT_RECOVERY = (
+    "If you have an endpoint id, reload it with endpoints.get. "
+    "Do not send a second create."
+)
+ENDPOINT_CONFLICT_RECOVERY = (
+    "Reload the existing endpoint with endpoints.get. "
+    "Do not send a second create."
+)
+ENDPOINT_WAIT_RECOVERY = (
+    "Reload it with endpoints.get(id), or call delete."
+)
 
 
 class Error(Exception):
@@ -108,6 +120,24 @@ class WaitTimeout(Error):
 
     code = "wait_timeout"
     _recovery = _WAIT_RECOVERY
+
+
+def recovery_for(code: str, noun: str) -> str | None:
+    """Recovery text that names ``noun``. ``None`` keeps the default.
+
+    Job errors keep the class default. Endpoint errors name
+    ``endpoints.get`` and ``delete`` instead of ``jobs.get`` and
+    ``cancel``.
+    """
+    if noun != "endpoint":
+        return None
+    if code == "key_conflict":
+        return ENDPOINT_CONFLICT_RECOVERY
+    if code == "wait_timeout":
+        return ENDPOINT_WAIT_RECOVERY
+    if code in {"access", "capacity"}:
+        return None
+    return ENDPOINT_RECOVERY
 
 
 def exposed_request_id(exc: object) -> str | None:

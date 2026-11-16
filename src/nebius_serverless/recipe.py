@@ -1,4 +1,4 @@
-"""Validate a job recipe and map it to a create request."""
+"""Validate a recipe and map a job to its create request."""
 
 import re
 import shlex
@@ -41,18 +41,22 @@ _UNITS = {
 }
 
 
-def validate_command(command: object) -> tuple[str, ...]:
+def validate_command(
+    command: object,
+    *,
+    operation: str = "Job",
+) -> tuple[str, ...]:
     """Return a nonempty command list. A shell string is rejected."""
     if isinstance(command, str) or not isinstance(command, Sequence):
         raise ValidationError(
             "command must be a nonempty list of strings, "
             "not a shell string.",
-            operation="Job",
+            operation=operation,
         )
     if len(command) == 0:
         raise ValidationError(
             "command must be a nonempty list of strings.",
-            operation="Job",
+            operation=operation,
         )
     parts: list[str] = []
     for item in command:
@@ -60,7 +64,7 @@ def validate_command(command: object) -> tuple[str, ...]:
             raise ValidationError(
                 "command must be a nonempty list of strings, "
                 "not a shell string.",
-                operation="Job",
+                operation=operation,
             )
         parts.append(item)
     return tuple(parts)
@@ -73,13 +77,13 @@ def quoted_args(command: Sequence[str]) -> str | None:
     return " ".join(shlex.quote(part) for part in command[1:])
 
 
-def validate_image(image: object) -> str:
+def validate_image(image: object, *, operation: str = "Job") -> str:
     """Accept a tag or a sha256 digest and return it unchanged."""
     if not isinstance(image, str) or _IMAGE.fullmatch(image) is None:
         raise ValidationError(
             "image must be registry/path:tag or "
             "registry/path@sha256:<64 hex>.",
-            operation="Job",
+            operation=operation,
         )
     return image
 
@@ -126,12 +130,12 @@ def _parse_duration(value: str) -> int | float | None:
     return int(value)
 
 
-def validate_pricing(pricing: object) -> str:
+def validate_pricing(pricing: object, *, operation: str = "Job") -> str:
     """Accept on-demand or spot."""
     if pricing not in ("on-demand", "spot"):
         raise ValidationError(
             "pricing must be 'on-demand' or 'spot'.",
-            operation="Job",
+            operation=operation,
         )
     return pricing
 
@@ -140,35 +144,42 @@ def reject_spot_on_cpu(
     pricing: str,
     gpu: str | None,
     platform: str | None,
+    *,
+    operation: str = "Job",
 ) -> None:
     """Spot on a known CPU machine is outside this slice."""
     if pricing == "spot" and known_cpu(gpu, platform):
         raise UnsupportedFeature(
             "Spot pricing is not supported on CPU.",
-            operation="Job",
+            operation=operation,
         )
 
 
-def validate_optional_text(value: object, field: str) -> str | None:
+def validate_optional_text(
+    value: object,
+    field: str,
+    *,
+    operation: str = "Job",
+) -> str | None:
     """Return a nonempty string, or None when the field was omitted."""
     if value is None:
         return None
     if not isinstance(value, str) or value == "":
         raise ValidationError(
             f"{field} must be a nonempty string.",
-            operation="Job",
+            operation=operation,
         )
     return value
 
 
-def disk_bytes(disk: str) -> int:
+def disk_bytes(disk: str, *, operation: str = "Job") -> int:
     """Parse a CLI disk size such as ``500Gi`` into bytes."""
     match = _DISK.fullmatch(disk)
     if match is None:
         raise ValidationError(
             "disk must be an integer size with an optional unit, "
             "such as 500Gi.",
-            operation="Job",
+            operation=operation,
         )
     amount = int(match.group(1))
     unit = match.group(2)
@@ -176,22 +187,30 @@ def disk_bytes(disk: str) -> int:
     return amount * scale
 
 
-def validate_disk(disk: str | None) -> str | None:
+def validate_disk(
+    disk: str | None,
+    *,
+    operation: str = "Job",
+) -> str | None:
     """Pass a disk string through after checking it parses."""
     if disk is None:
         return None
-    disk_bytes(disk)
+    disk_bytes(disk, operation=operation)
     return disk
 
 
-def validate_volumes(volumes: object) -> tuple[str, ...]:
+def validate_volumes(
+    volumes: object,
+    *,
+    operation: str = "Job",
+) -> tuple[str, ...]:
     """Pass volume strings through. Objects are not looked up."""
     if volumes is None:
         return ()
     if isinstance(volumes, str) or not isinstance(volumes, Sequence):
         raise ValidationError(
             "volumes must be a list of mount strings.",
-            operation="Job",
+            operation=operation,
         )
     checked: list[str] = []
     for item in volumes:
@@ -199,7 +218,7 @@ def validate_volumes(volumes: object) -> tuple[str, ...]:
             raise ValidationError(
                 "volumes must be source:container_path[:mode] or "
                 "s3://bucket:/container_path[:mode[:profile]].",
-                operation="Job",
+                operation=operation,
             )
         checked.append(item)
     return tuple(checked)
@@ -239,26 +258,30 @@ def parse_volume(item: str) -> dict[str, str]:
     }
 
 
-def validate_env(env: object) -> tuple[tuple[str, str], ...]:
+def validate_env(
+    env: object,
+    *,
+    operation: str = "Job",
+) -> tuple[tuple[str, str], ...]:
     """Copy env pairs. Values stay on the recipe and off the plan."""
     if env is None:
         return ()
     if not isinstance(env, Mapping):
         raise ValidationError(
             "env must be a dict of strings.",
-            operation="Job",
+            operation=operation,
         )
     pairs: list[tuple[str, str]] = []
     for key, value in env.items():
         if not isinstance(key, str) or key == "":
             raise ValidationError(
                 "env keys must be nonempty strings.",
-                operation="Job",
+                operation=operation,
             )
         if not isinstance(value, str):
             raise ValidationError(
                 "env values must be strings.",
-                operation="Job",
+                operation=operation,
             )
         pairs.append((key, value))
     return tuple(pairs)
@@ -268,13 +291,19 @@ def check_identity(
     gpu: str | None,
     platform: str | None,
     preset: str | None,
+    *,
+    operation: str = "Job",
 ) -> None:
     """Validate alias names and the platform/preset pair."""
-    validate_gpu_name(gpu, platform)
-    validate_platform(platform, preset)
+    validate_gpu_name(gpu, platform, operation=operation)
+    validate_platform(platform, preset, operation=operation)
 
 
-def validate_inject_files(inject_files: object) -> tuple[str, ...]:
+def validate_inject_files(
+    inject_files: object,
+    *,
+    operation: str = "Job",
+) -> tuple[str, ...]:
     """Pass inject-file strings through. Files are read on create."""
     if inject_files is None:
         return ()
@@ -284,7 +313,7 @@ def validate_inject_files(inject_files: object) -> tuple[str, ...]:
         raise ValidationError(
             "inject_files must be a list of "
             "local_path:container_path strings.",
-            operation="Job",
+            operation=operation,
         )
     items: list[str] = []
     for item in inject_files:
@@ -292,7 +321,7 @@ def validate_inject_files(inject_files: object) -> tuple[str, ...]:
             raise ValidationError(
                 "inject_files must be local_path:container_path, "
                 "matching the CLI --inject-file form.",
-                operation="Job",
+                operation=operation,
             )
         items.append(item)
     return tuple(items)

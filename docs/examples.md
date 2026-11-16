@@ -10,6 +10,8 @@ Examples are grouped by use case. Settings other than a YAML path live in the Py
 | --- | --- |
 | [`examples/job_quickstart.py`](../examples/job_quickstart.py) | One `nvidia-smi` job, the [README](../README.md) recipe |
 | [`examples/from_yaml/`](../examples/from_yaml/) | That same recipe loaded from YAML |
+| [`examples/endpoint_quickstart.py`](../examples/endpoint_quickstart.py) | vLLM endpoint on an L40S: create, wait, call `/v1/chat/completions`, delete. YAML: [`vllm_endpoint.yaml`](../examples/from_yaml/vllm_endpoint.yaml) |
+| [`examples/notebook/endpoint_quickstart.ipynb`](../examples/notebook/endpoint_quickstart.ipynb) | The same endpoint in Jupyter, with the awaited twins and a separate delete cell |
 | [`examples/train/`](../examples/train/) | Axolotl fine-tune |
 | [`examples/finetuning/`](../examples/finetuning/) | Axolotl QLoRA fine-tune (`config.yaml` + S3 bucket mount) |
 | [`examples/parallel_jobs/`](../examples/parallel_jobs/) | Parallel Axolotl fine-tuning sweep across two models, saving outputs to S3 |
@@ -203,13 +205,14 @@ print(loaded.status)
 
 ## Cancel
 
-`cancel` returns when the request is accepted. Poll `get` afterwards for `CANCELLED`.
+`cancel` returns when the request is accepted, with the job usually `CANCELLING`. Stopping the container can take minutes. `wait()` returns once it is `CANCELLED`.
 
 ```python
 payload = run.cancel()
 print(payload)
-later = run.get()
-print(later["status"]["state"])
+print(run.get()["status"]["state"])   # usually CANCELLING
+record = run.wait()
+print(record["status"]["state"])      # CANCELLED
 ```
 
 A local `wait` timeout leaves the job running:

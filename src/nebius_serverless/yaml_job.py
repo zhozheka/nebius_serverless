@@ -1,4 +1,4 @@
-"""Strict loader for schema-version-1 command documents."""
+"""Strict loader for schema-version-1 job and endpoint documents."""
 
 from collections.abc import Mapping
 from pathlib import Path
@@ -25,6 +25,26 @@ _ALLOWED = frozenset(
         "preset",
         "timeout",
         "pricing",
+        "subnet_id",
+        "volumes",
+        "env",
+        "name",
+        "disk",
+    }
+)
+_ENDPOINT_ALLOWED = frozenset(
+    {
+        "schema_version",
+        "kind",
+        "image",
+        "command",
+        "port",
+        "gpu",
+        "platform",
+        "preset",
+        "pricing",
+        "auth",
+        "token",
         "subnet_id",
         "volumes",
         "env",
@@ -119,6 +139,19 @@ def load_yaml_fields(path: str | Path) -> dict[str, object]:
     Relative strings inside the document are not expanded. A document
     over 1 MiB is rejected before it is parsed.
     """
+    return _fields(_load_document(path))
+
+
+def load_endpoint_yaml_fields(path: str | Path) -> dict[str, object]:
+    """Read one endpoint document into ``Endpoint`` constructor arguments.
+
+    The same strict rules as job documents apply. ``kind`` must be
+    ``endpoint``.
+    """
+    return _endpoint_fields(_load_document(path))
+
+
+def _load_document(path: str | Path) -> dict[object, object]:
     source = Path(path)
     try:
         data = source.read_bytes()
@@ -153,7 +186,7 @@ def load_yaml_fields(path: str | Path) -> dict[str, object]:
             "The YAML document must be a mapping.",
             operation="from_yaml",
         )
-    return _fields(document)
+    return document
 
 
 def _fields(document: Mapping[object, object]) -> dict[str, object]:
@@ -163,6 +196,11 @@ def _fields(document: Mapping[object, object]) -> dict[str, object]:
     ):
         raise UnsupportedFeature(
             "Function YAML is not supported. Use Job.create().",
+            operation="from_yaml",
+        )
+    if document.get("kind") == "endpoint":
+        raise ValidationError(
+            "kind is endpoint. Load it with Endpoint.from_yaml.",
             operation="from_yaml",
         )
     unknown = sorted(
@@ -194,6 +232,56 @@ def _fields(document: Mapping[object, object]) -> dict[str, object]:
         "platform",
         "preset",
         "pricing",
+        "subnet_id",
+        "volumes",
+        "env",
+        "name",
+        "disk",
+    ):
+        if name in document and document[name] is not None:
+            fields[name] = document[name]
+    return fields
+
+
+def _endpoint_fields(
+    document: Mapping[object, object],
+) -> dict[str, object]:
+    if document.get("kind") == "job":
+        raise ValidationError(
+            "kind is job. Load it with Job.from_yaml.",
+            operation="from_yaml",
+        )
+    unknown = sorted(
+        str(key) for key in document if key not in _ENDPOINT_ALLOWED
+    )
+    if unknown:
+        names = ", ".join(unknown)
+        raise ValidationError(
+            f"Unknown YAML keys: {names}.",
+            operation="from_yaml",
+        )
+    if document.get("schema_version") != 1:
+        raise ValidationError(
+            "schema_version must be 1.",
+            operation="from_yaml",
+        )
+    if document.get("kind") != "endpoint":
+        raise ValidationError(
+            "kind must be endpoint.",
+            operation="from_yaml",
+        )
+    fields: dict[str, object] = {
+        "image": document.get("image"),
+        "port": document.get("port"),
+    }
+    for name in (
+        "command",
+        "gpu",
+        "platform",
+        "preset",
+        "pricing",
+        "auth",
+        "token",
         "subnet_id",
         "volumes",
         "env",

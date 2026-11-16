@@ -1,4 +1,4 @@
-"""Create, get, and cancel behind a small transport object."""
+"""Create, get, cancel, and delete behind a small transport object."""
 
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -12,6 +12,7 @@ from .errors import (
     SubmissionUncertain,
     TransportError,
     exposed_request_id,
+    recovery_for,
 )
 
 
@@ -28,7 +29,7 @@ class CreateResult:
 
 
 class Transport(Protocol):
-    """The calls the client makes after a recipe is valid."""
+    """The job calls the client makes after a recipe is valid."""
 
     def create(self, body: Mapping[str, object]) -> CreateResult:
         """Send one create. Do not retry."""
@@ -40,8 +41,25 @@ class Transport(Protocol):
         """Request cancellation once."""
 
 
-def finish_create(result: CreateResult) -> str:
-    """Return the job id, or raise the error this result stands for.
+class EndpointTransport(Protocol):
+    """The endpoint calls the client makes after a recipe is valid."""
+
+    def create(self, body: Mapping[str, object]) -> CreateResult:
+        """Send one create. Do not retry."""
+
+    def get(self, endpoint_id: str) -> dict[str, object]:
+        """Fetch one endpoint."""
+
+    def delete(self, endpoint_id: str) -> dict[str, object]:
+        """Request deletion once."""
+
+
+class _Creates(Protocol):
+    def create(self, body: Mapping[str, object]) -> CreateResult: ...
+
+
+def finish_create(result: CreateResult, *, noun: str = "job") -> str:
+    """Return the resource id, or raise the error this result stands for.
 
     A lost id raises ``SubmissionUncertain`` and does not create again.
     The caller invokes the transport once.
@@ -56,7 +74,7 @@ def finish_create(result: CreateResult) -> str:
         )
     if failure == "capacity":
         raise CapacityError(
-            "The API rejected the job for quota or capacity.",
+            f"The API rejected the {noun} for quota or capacity.",
             operation="create",
             request_id=request_id,
         )
@@ -67,37 +85,34 @@ def finish_create(result: CreateResult) -> str:
                 operation="create",
                 run_id=result.conflict_id,
                 request_id=request_id,
+                recovery=recovery_for(KeyConflict.code, noun),
             )
-        raise SubmissionUncertain(
-            "Create may have been accepted and the id is unknown.",
-            operation="create",
-            request_id=request_id,
-        )
+        raise _uncertain(request_id, noun)
     if failure == "transport":
         raise TransportError(
             "The call failed before create was accepted.",
             operation="create",
             request_id=request_id,
+            recovery=recovery_for(TransportError.code, noun),
         )
     lost = result.accepted and not result.resource_id
     if failure == "uncertain" or lost:
-        raise SubmissionUncertain(
-            "Create may have been accepted and the id is unknown.",
-            operation="create",
-            request_id=request_id,
-        )
+        raise _uncertain(request_id, noun)
     if not result.resource_id:
         raise TransportError(
             "The call failed before create was accepted.",
             operation="create",
             request_id=request_id,
+            recovery=recovery_for(TransportError.code, noun),
         )
     return result.resource_id
 
 
 def call_transport(
-    transport: Transport,
+    transport: _Creates,
     body: Mapping[str, object],
+    *,
+    noun: str = "job",
 ) -> CreateResult:
     """Create once and map the outcome. Unexpected errors are not retries."""
     try:
@@ -109,6 +124,16 @@ def call_transport(
             "The call failed before create was accepted.",
             operation="create",
             request_id=exposed_request_id(exc),
+            recovery=recovery_for(TransportError.code, noun),
         ) from None
-    finish_create(result)
+    finish_create(result, noun=noun)
     return result
+
+
+def _uncertain(request_id: str | None, noun: str) -> SubmissionUncertain:
+    return SubmissionUncertain(
+        "Create may have been accepted and the id is unknown.",
+        operation="create",
+        request_id=request_id,
+        recovery=recovery_for(SubmissionUncertain.code, noun),
+    )

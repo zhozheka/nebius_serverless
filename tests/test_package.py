@@ -22,10 +22,12 @@ def test_public_surface() -> None:
     assert ns.__all__ == [
         "AccessError",
         "CapacityError",
+        "Endpoint",
         "Error",
         "Job",
         "KeyConflict",
         "Run",
+        "Service",
         "SubmissionUncertain",
         "TransportError",
         "UnsupportedFeature",
@@ -33,6 +35,7 @@ def test_public_surface() -> None:
         "WaitTimeout",
         "configure_logging",
         "diagnostics",
+        "endpoints",
         "jobs",
     ]
     for name in ("submit", "plan", "result", "refresh"):

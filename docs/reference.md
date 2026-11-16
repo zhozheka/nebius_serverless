@@ -11,6 +11,7 @@ import nebius_serverless as ns
 | [`Job`](#job) | Local recipe. No cloud id. |
 | [`Run`](#run) | One Nebius job after create. |
 | [`jobs`](#jobs) | Fetch a job from a saved id. |
+| [`Endpoint`, `Service`, `endpoints`](endpoints.md) | Long-running endpoints on a managed URL. Documented in [endpoints.md](endpoints.md). |
 | [`configure_logging`](#configure_logging) | Opt in to diagnostic logs. |
 | [`diagnostics`](#diagnostics) | Local version and presentation metadata. |
 | [Errors](#errors) | Failures raised by this package. |
@@ -58,7 +59,7 @@ run.wait(quiet=True)  # no progress; DEBUG records still emit
 
 It does not report an ambient quiet switch. A call can still pass `quiet=True`. No profile, credentials, environment values, or job records are included.
 
-A local timeout stops waiting only. No cancellation was requested, and the job may still be running. Reload it with `jobs.get(id)` or call `cancel`. Cancelling `wait_async` stops the progress display and does not cancel the cloud job.
+A local timeout stops waiting only. No cancellation was requested, and the job may still be running. Reload it with `jobs.get(id)` or call `cancel`. Cancelling `wait_async` stops the progress display and the polling, once a `get` already in flight returns. It does not cancel the cloud job.
 
 SDK progress and these diagnostics are separate from container logs. Those remain `nebius ai job logs <id>`.
 
@@ -215,7 +216,7 @@ Polls `get` about every 10 seconds until `status.state` is terminal, then return
 run.cancel(*, quiet=False) -> dict
 ```
 
-Requests cancellation and returns when the request is accepted. The payload does not claim the container has stopped. Progress says the request was accepted. `quiet=True` suppresses that line for this call only. A later `get` reports the cancelled state when Nebius has finished cancelling.
+Requests cancellation and returns when the request is accepted. It does not wait for the container to stop: the job is usually `CANCELLING` at that point, and stopping can take minutes. The payload does not claim the container has stopped. `wait()` returns once the state is `CANCELLED`. Progress says the request was accepted. `quiet=True` suppresses that line for this call only. A later `get` reports the cancelled state when Nebius has finished cancelling.
 
 ### `Run.display`
 
@@ -235,7 +236,7 @@ await run.wait_async(timeout=None, *, quiet=False)
 await run.cancel_async(*, quiet=False)
 ```
 
-Same calls as the synchronous methods, including `quiet`. Cancelling `wait_async` or `get_async` does not cancel the cloud job. Cancelling `wait_async` also stops its progress display.
+Same calls as the synchronous methods, including `quiet`. Cancelling `wait_async` or `get_async` does not cancel the cloud job. Cancelling `wait_async` also stops its progress display and its polling, so `asyncio.run` can return.
 
 ## jobs
 

@@ -203,7 +203,7 @@ def test_explicit_location_skips_the_profile(
     def boom(profile: str | None = None, **kwargs: object) -> tuple[str, str]:
         raise AssertionError(profile)
 
-    monkeypatch.setattr("nebius_serverless.job.load_profile", boom)
+    monkeypatch.setattr("nebius_serverless.profile.load_profile", boom)
     described = _job().create(
         dry_run=True,
         region="eu-north1",
@@ -222,7 +222,7 @@ def test_missing_profile_fails_before_create(
     ) -> tuple[str, str]:
         raise ns.ValidationError("missing", operation="create")
 
-    monkeypatch.setattr("nebius_serverless.job.load_profile", missing)
+    monkeypatch.setattr("nebius_serverless.profile.load_profile", missing)
     fake = FakeTransport()
     with pytest.raises(ns.ValidationError):
         _job().create(transport=fake)
@@ -295,7 +295,7 @@ def test_project_region_fills_a_global_profile(
         assert project_id == "project-123"
         return "eu-north1"
 
-    monkeypatch.setattr("nebius_serverless.job.load_profile", load)
+    monkeypatch.setattr("nebius_serverless.profile.load_profile", load)
     monkeypatch.setattr(
         "nebius_serverless.sdk_transport.project_region",
         region,
@@ -319,7 +319,7 @@ def test_explicit_region_skips_the_project_lookup(
     def region(profile: str | None, project_id: str) -> str:
         raise AssertionError(project_id)
 
-    monkeypatch.setattr("nebius_serverless.job.load_profile", load)
+    monkeypatch.setattr("nebius_serverless.profile.load_profile", load)
     monkeypatch.setattr(
         "nebius_serverless.sdk_transport.project_region",
         region,

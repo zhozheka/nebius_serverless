@@ -62,5 +62,57 @@ class FakeClock:
     def monotonic(self) -> float:
         return self.now
 
-    def sleep(self, seconds: float) -> None:
+    def sleep(self, seconds: float, stop: object = None) -> None:
         self.now += seconds
+
+
+class FakeEndpointTransport:
+    """Records endpoint create, get, and delete. Does not contact Nebius.
+
+    ``states`` and ``urls`` are consumed one per get, and the last entry
+    repeats.
+    """
+
+    def __init__(self) -> None:
+        self.bodies: list[dict[str, object]] = []
+        self.gets: list[str] = []
+        self.deletes: list[str] = []
+        self.drop_id = False
+        self.failure: str | None = None
+        self.state: str | None = "PROVISIONING"
+        self.states = ["RUNNING"]
+        self.urls: list[str | None] = ["https://ep.example.nebius.cloud"]
+        self._n = 0
+        self._get_i = 0
+
+    def create(self, body: Mapping[str, object]) -> CreateResult:
+        self.bodies.append(copy.deepcopy(dict(body)))
+        self._n += 1
+        if self.failure is not None:
+            return CreateResult(accepted=False, failure=self.failure)
+        if self.drop_id:
+            return CreateResult(accepted=True, resource_id=None)
+        return CreateResult(
+            resource_id=f"endpoint-{self._n}",
+            accepted=True,
+            state=self.state,
+        )
+
+    def get(self, endpoint_id: str) -> dict[str, object]:
+        self.gets.append(endpoint_id)
+        i = self._get_i
+        self._get_i += 1
+        state = self.states[min(i, len(self.states) - 1)]
+        url = self.urls[min(i, len(self.urls) - 1)]
+        status: dict[str, object] = {"state": state}
+        if url is not None:
+            status["public_endpoints"] = [url]
+        return {
+            "metadata": {"id": endpoint_id, "name": "saved-endpoint"},
+            "spec": {"image": "vllm/vllm-openai:v0.19.1"},
+            "status": status,
+        }
+
+    def delete(self, endpoint_id: str) -> dict[str, object]:
+        self.deletes.append(endpoint_id)
+        return {"id": endpoint_id, "resource_id": endpoint_id}

@@ -1,6 +1,7 @@
-"""Nebius Python SDK adapter for create, get, and cancel.
+"""Nebius Python SDK adapters for jobs and endpoints.
 
-Imported on the call that needs it. ``Job()`` does not import this module.
+Imported on the call that needs it. ``Job()`` and ``Endpoint()`` do not
+import this module.
 """
 
 import atexit
@@ -16,6 +17,7 @@ from .errors import (
     TransportError,
     ValidationError,
     exposed_request_id,
+    recovery_for,
 )
 from .recipe import disk_bytes
 from .transport import CreateResult
@@ -33,17 +35,28 @@ _DEFINITE = frozenset(
 )
 
 
-class SdkTransport:
-    """Create, get, and cancel through ``JobServiceClient``.
-
-    The client does not shell out to the ``nebius`` binary and does not
-    hand-roll REST. One SDK instance is kept for later get and cancel.
-    """
+class _SdkSession:
+    """One lazily opened SDK, closed at interpreter exit."""
 
     def __init__(self, profile: str | None, project: str | None) -> None:
         self._profile = profile
         self._project = project
         self._sdk: object | None = None
+
+    def _session(self) -> object:
+        if self._sdk is None:
+            sdk = open_sdk(self._profile, self._project)
+            atexit.register(sdk.sync_close)
+            self._sdk = sdk
+        return self._sdk
+
+
+class SdkTransport(_SdkSession):
+    """Create, get, and cancel through ``JobServiceClient``.
+
+    The client does not shell out to the ``nebius`` binary and does not
+    hand-roll REST. One SDK instance is kept for later get and cancel.
+    """
 
     def create(self, body: Mapping[str, object]) -> CreateResult:
         """Create once and wait until the operation has a resource id."""
@@ -102,7 +115,12 @@ class SdkTransport:
         return payload
 
     def cancel(self, job_id: str) -> dict[str, object]:
-        """Ask Nebius to cancel. Return when the request is accepted."""
+        """Ask Nebius to cancel. Return when the request is accepted.
+
+        This does not wait for the cancel operation. The job is
+        ``CANCELLING`` right after, and stopping the container can take
+        minutes. ``get`` reports ``CANCELLED`` once it has stopped.
+        """
         try:
             from nebius.aio.service_error import RequestError
             from nebius.api.nebius.ai.v1 import CancelJobRequest
@@ -116,7 +134,6 @@ class SdkTransport:
             operation = self._client().cancel(
                 CancelJobRequest(id=job_id)
             ).wait()
-            operation.sync_wait()
         except RequestError as exc:
             _raise_call(exc, operation="cancel", job_id=job_id)
         except Exception as exc:
@@ -132,13 +149,129 @@ class SdkTransport:
         }
 
     def _client(self) -> object:
-        if self._sdk is None:
-            sdk = open_sdk(self._profile, self._project)
-            atexit.register(sdk.sync_close)
-            self._sdk = sdk
         from nebius.api.nebius.ai.v1 import JobServiceClient
 
-        return JobServiceClient(self._sdk)
+        return JobServiceClient(self._session())
+
+
+class SdkEndpointTransport(_SdkSession):
+    """Create, get, and delete through ``EndpointServiceClient``.
+
+    One SDK instance is kept for later get and delete.
+    """
+
+    def create(self, body: Mapping[str, object]) -> CreateResult:
+        """Create once and return as soon as the endpoint id is known."""
+        try:
+            from nebius.aio.service_error import RequestError
+        except ImportError:
+            raise TransportError(
+                "The Nebius SDK is required to create an endpoint.",
+                operation="create",
+                recovery=recovery_for(TransportError.code, "endpoint"),
+            ) from None
+        try:
+            operation = self._client().create(
+                build_endpoint_request(body)
+            ).wait()
+        except RequestError as exc:
+            return _from_request(exc, sent=False)
+        except Exception as exc:
+            return CreateResult(
+                accepted=False,
+                failure="transport",
+                request_id=exposed_request_id(exc),
+            )
+        return _result_when_id_known(operation)
+
+    def get(self, endpoint_id: str) -> dict[str, object]:
+        """Fetch one endpoint and return its JSON object."""
+        try:
+            from nebius.aio.service_error import RequestError
+            from nebius.api.nebius.ai.v1 import GetEndpointRequest
+        except ImportError:
+            raise TransportError(
+                "The Nebius SDK is required to get an endpoint.",
+                operation="get",
+                run_id=endpoint_id,
+            ) from None
+        try:
+            endpoint = self._client().get(
+                GetEndpointRequest(id=endpoint_id)
+            ).wait()
+        except RequestError as exc:
+            _raise_call(
+                exc,
+                operation="get",
+                job_id=endpoint_id,
+                noun="endpoint",
+            )
+        except Exception as exc:
+            raise TransportError(
+                f"The get call failed for endpoint {endpoint_id}.",
+                operation="get",
+                run_id=endpoint_id,
+                request_id=exposed_request_id(exc),
+                recovery=recovery_for(TransportError.code, "endpoint"),
+            ) from None
+        payload = json.loads(
+            endpoint.to_json(preserving_proto_field_name=True)
+        )
+        if not isinstance(payload, dict):
+            raise TransportError(
+                f"The get call failed for endpoint {endpoint_id}.",
+                operation="get",
+                run_id=endpoint_id,
+                recovery=recovery_for(TransportError.code, "endpoint"),
+            )
+        spec = payload.get("spec")
+        if isinstance(spec, dict):
+            # The bearer token stays with the create call that made it.
+            spec.pop("auth_token", None)
+        return payload
+
+    def delete(self, endpoint_id: str) -> dict[str, object]:
+        """Ask Nebius to delete. Return when the request is accepted.
+
+        This does not wait for the machine to stop.
+        """
+        try:
+            from nebius.aio.service_error import RequestError
+            from nebius.api.nebius.ai.v1 import DeleteEndpointRequest
+        except ImportError:
+            raise TransportError(
+                "The Nebius SDK is required to delete an endpoint.",
+                operation="delete",
+                run_id=endpoint_id,
+            ) from None
+        try:
+            operation = self._client().delete(
+                DeleteEndpointRequest(id=endpoint_id)
+            ).wait()
+        except RequestError as exc:
+            _raise_call(
+                exc,
+                operation="delete",
+                job_id=endpoint_id,
+                noun="endpoint",
+            )
+        except Exception as exc:
+            raise TransportError(
+                f"The delete call failed for endpoint {endpoint_id}.",
+                operation="delete",
+                run_id=endpoint_id,
+                request_id=exposed_request_id(exc),
+                recovery=recovery_for(TransportError.code, "endpoint"),
+            ) from None
+        return {
+            "id": endpoint_id,
+            "resource_id": _resource_id(operation) or endpoint_id,
+        }
+
+    def _client(self) -> object:
+        from nebius.api.nebius.ai.v1 import EndpointServiceClient
+
+        return EndpointServiceClient(self._session())
 
 
 def open_sdk(profile: str | None, project: str | None) -> object:
@@ -351,6 +484,113 @@ def build_create_request(body: Mapping[str, object]) -> object:
     )
 
 
+def build_endpoint_request(body: Mapping[str, object]) -> object:
+    """Turn the mapped endpoint body into ``CreateEndpointRequest``."""
+    from nebius.api.nebius.ai.v1 import (
+        CreateEndpointRequest,
+        EndpointSpec,
+        FollowsSpotPriceSpec,
+        PricingModelSpec,
+    )
+    from nebius.api.nebius.common.v1 import ResourceMetadata
+    from nebius.api.nebius.compute.v1 import DiskSpec as ComputeDisk
+
+    metadata = body["metadata"]
+    spec = body["spec"]
+    if not isinstance(metadata, Mapping) or not isinstance(spec, Mapping):
+        raise TransportError(
+            "The call failed before create was accepted.",
+            operation="create",
+        )
+    disk = spec["disk"]
+    if not isinstance(disk, str):
+        raise TransportError(
+            "The call failed before create was accepted.",
+            operation="create",
+        )
+    spec_kwargs: dict[str, object] = {
+        "image": spec["image"],
+        "platform": spec["platform"],
+        "preset": spec["preset"],
+        "shm_size_bytes": spec["shm_size_bytes"],
+        "disk": EndpointSpec.DiskSpec(
+            type=ComputeDisk.DiskType.NETWORK_SSD,
+            size_bytes=disk_bytes(disk),
+        ),
+        "ports": [
+            EndpointSpec.Port(
+                container_port=int(item["container_port"]),
+                protocol=EndpointSpec.Port.Protocol.HTTP,
+            )
+            for item in spec.get("ports", [])
+            if isinstance(item, Mapping)
+        ],
+    }
+    if "container_command" in spec:
+        spec_kwargs["container_command"] = spec["container_command"]
+    if "args" in spec:
+        spec_kwargs["args"] = spec["args"]
+    if "subnet_id" in spec:
+        spec_kwargs["subnet_id"] = spec["subnet_id"]
+    if "auth_token" in spec:
+        spec_kwargs["auth_token"] = spec["auth_token"]
+    if spec.get("preemptible") is True:
+        spec_kwargs["preemptible"] = True
+        spec_kwargs["pricing_model"] = PricingModelSpec(
+            follows_spot_price=FollowsSpotPriceSpec(),
+        )
+    variables = spec.get("environment_variables")
+    if isinstance(variables, list) and variables:
+        spec_kwargs["environment_variables"] = [
+            EndpointSpec.EnvironmentVariable(
+                name=item["name"],
+                value=item["value"],
+            )
+            for item in variables
+            if isinstance(item, Mapping)
+        ]
+    mounts = spec.get("volumes")
+    if isinstance(mounts, list) and mounts:
+        spec_kwargs["volumes"] = [
+            _endpoint_mount(item)
+            for item in mounts
+            if isinstance(item, Mapping)
+        ]
+    injections = spec.get("injected_files")
+    if isinstance(injections, list) and injections:
+        spec_kwargs["injected_files"] = [
+            EndpointSpec.FileInjection(
+                container_path=str(item["container_path"]),
+                content=item["content"],
+            )
+            for item in injections
+            if isinstance(item, Mapping)
+        ]
+    return CreateEndpointRequest(
+        metadata=ResourceMetadata(
+            parent_id=str(metadata["parent_id"]),
+            name=str(metadata["name"]),
+        ),
+        spec=EndpointSpec(**spec_kwargs),
+    )
+
+
+def _endpoint_mount(item: Mapping[str, object]) -> object:
+    from nebius.api.nebius.ai.v1 import EndpointSpec
+
+    mode = item.get("mode", "rw")
+    selected = (
+        EndpointSpec.VolumeMount.Mode.READ_ONLY
+        if mode == "ro"
+        else EndpointSpec.VolumeMount.Mode.READ_WRITE
+    )
+    return EndpointSpec.VolumeMount(
+        source=str(item["source"]),
+        container_path=str(item["container_path"]),
+        mode=selected,
+    )
+
+
 def _mount(item: Mapping[str, object]) -> object:
     from nebius.api.nebius.ai.v1 import JobSpec
 
@@ -436,7 +676,13 @@ def _conflict_id(errors: object) -> str | None:
     return None
 
 
-def _raise_call(exc: object, *, operation: str, job_id: str) -> None:
+def _raise_call(
+    exc: object,
+    *,
+    operation: str,
+    job_id: str,
+    noun: str = "job",
+) -> None:
     result = _from_request(exc, sent=True)
     request_id = result.request_id
     if result.failure == "access":
@@ -448,7 +694,7 @@ def _raise_call(exc: object, *, operation: str, job_id: str) -> None:
         ) from None
     if result.failure == "capacity":
         raise CapacityError(
-            "The API rejected the job for quota or capacity.",
+            f"The API rejected the {noun} for quota or capacity.",
             operation=operation,
             run_id=job_id,
             request_id=request_id,
@@ -459,12 +705,17 @@ def _raise_call(exc: object, *, operation: str, job_id: str) -> None:
             operation=operation,
             run_id=job_id,
             request_id=request_id,
+            recovery=recovery_for(SubmissionUncertain.code, noun),
         ) from None
+    message = "The call failed."
+    if noun != "job":
+        message = f"The {operation} call failed for {noun} {job_id}."
     raise TransportError(
-        "The call failed.",
+        message,
         operation=operation,
         run_id=job_id,
         request_id=request_id,
+        recovery=recovery_for(TransportError.code, noun),
     ) from None
 
 
