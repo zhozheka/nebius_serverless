@@ -17,7 +17,7 @@ Examples are grouped by use case. Settings other than a YAML path live in the Py
 | [`examples/parallel_jobs/`](../examples/parallel_jobs/) | Parallel Axolotl fine-tuning sweep across two models, saving outputs to S3 |
 | [`examples/batch/matrix_multiply.py`](../examples/batch/matrix_multiply.py) | Three GPU matrix multiplications, one size per job |
 | [`examples/signals/sigterm.py`](../examples/signals/sigterm.py) | CPU job that catches SIGTERM after 60 seconds, logs it, and shuts down cleanly |
-| [`examples/signals/repeatable_job.ipynb`](../examples/signals/repeatable_job.ipynb) | `RepeatableJob` prototype: submit an interrupted job again until it completes, resuming from a checkpoint in a bucket |
+| [`examples/signals/repeatable_job.ipynb`](../examples/signals/repeatable_job.ipynb) | `RepeatableJob` prototype: tell an external cancellation or platform error from a job failure, submit the job again only for the first two, and resume from a checkpoint in a bucket |
 | [`examples/benchmark/`](../examples/benchmark/) | Side-by-side [SDK comparison](../examples/benchmark/sdk-comparison.md) (Official Nebius, Designed Nebius, Modal, RunPod) |
 
 ## Quickstart

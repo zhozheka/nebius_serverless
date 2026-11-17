@@ -5,7 +5,7 @@ number is saved to ``$CKPT_DIR/checkpoint.json`` every ``SAVE_EVERY``
 steps and on SIGTERM. A new attempt starts from that checkpoint.
 
 Exit codes: 0 when all ``TOTAL_STEPS`` are done, 143 after SIGTERM
-(checkpoint saved), so an interrupted attempt ends ``FAILED``.
+(checkpoint saved).
 """
 
 import json
