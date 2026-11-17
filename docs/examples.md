@@ -16,6 +16,7 @@ Examples are grouped by use case. Settings other than a YAML path live in the Py
 | [`examples/finetuning/`](../examples/finetuning/) | Axolotl QLoRA fine-tune (`config.yaml` + S3 bucket mount) |
 | [`examples/parallel_jobs/`](../examples/parallel_jobs/) | Parallel Axolotl fine-tuning sweep across two models, saving outputs to S3 |
 | [`examples/batch/matrix_multiply.py`](../examples/batch/matrix_multiply.py) | Three GPU matrix multiplications, one size per job |
+| [`examples/signals/sigterm.py`](../examples/signals/sigterm.py) | CPU job that catches SIGTERM after 60 seconds, logs it, and shuts down cleanly |
 | [`examples/benchmark/`](../examples/benchmark/) | Side-by-side [SDK comparison](../examples/benchmark/sdk-comparison.md) (Official Nebius, Designed Nebius, Modal, RunPod) |
 
 ## Quickstart
@@ -191,6 +192,46 @@ An error stops the script and includes the size and, once create has returned, t
 nebius ai job delete <id>
 aws s3 rm --recursive "s3://<bucket>/matrix-multiply/<uuid>/" \
   --endpoint-url https://storage.eu-north1.nebius.cloud
+```
+
+## Graceful shutdown on SIGTERM
+
+[`examples/signals/sigterm.py`](../examples/signals/sigterm.py) runs a Python worker on a CPU machine (`python:3.12-slim`) under coreutils `timeout`. After 60 seconds `timeout` sends SIGTERM. The worker logs the signal, runs a cleanup step, and exits 0, so the job ends `COMPLETED`. If the worker is still running 30 seconds after SIGTERM, `timeout` sends SIGKILL and the job ends `FAILED`. If SIGTERM never arrives, the worker exits 1 after 300 seconds.
+
+```python
+job = ns.Job(
+    [
+        "timeout",
+        "--preserve-status",
+        "--kill-after=30",
+        "--signal=TERM",
+        "60",
+        "python",
+        "-u",
+        "-c",
+        WORKER,
+    ],
+    image="python:3.12-slim",
+    timeout="1h",
+    name="sigterm-example",
+)
+```
+
+`timeout` is PID 1 and forwards the signal to the worker. If the worker runs under `bash -lc`, use `exec python ...`: bash as PID 1 does not forward SIGTERM to its child. `--preserve-status` makes the job's exit code the worker's exit code instead of `124`. After the job finishes, the script reads `nebius ai job logs <id>` and exits non-zero when the `received SIGTERM` line is missing.
+
+```bash
+uv run python examples/signals/sigterm.py
+```
+
+The worker log looks like this. Times and the pid are an illustration.
+
+```text
+2026-11-17 13:29:22,144 INFO worker started, pid 7
+2026-11-17 13:30:12,168 INFO working: step 50, 49s elapsed
+2026-11-17 13:30:22,177 WARNING received SIGTERM after 60.0s at step 60
+2026-11-17 13:30:22,178 INFO cleanup: saving progress at step 60
+2026-11-17 13:30:24,184 INFO cleanup: done
+2026-11-17 13:30:24,184 INFO graceful shutdown complete
 ```
 
 ## Secrets, private images, retries, and spot caps
