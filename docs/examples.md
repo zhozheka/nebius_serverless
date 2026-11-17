@@ -196,9 +196,11 @@ aws s3 rm --recursive "s3://<bucket>/matrix-multiply/<uuid>/" \
 
 ## Graceful shutdown on SIGTERM
 
-[`examples/signals/sigterm.py`](../examples/signals/sigterm.py) runs a Python worker on a CPU machine (`python:3.12-slim`) under coreutils `timeout`. After 60 seconds `timeout` sends SIGTERM. The worker logs the signal, runs a cleanup step, and exits 0, so the job ends `COMPLETED`. If the worker is still running 30 seconds after SIGTERM, `timeout` sends SIGKILL and the job ends `FAILED`. If SIGTERM never arrives, the worker exits 1 after 300 seconds.
+[`examples/signals/sigterm.py`](../examples/signals/sigterm.py) runs [`examples/signals/sigterm_worker.py`](../examples/signals/sigterm_worker.py) on a CPU machine (`python:3.12-slim`) under coreutils `timeout`. The worker is a plain Python file uploaded with `inject_files`: it is read on `create` (at most 64 KiB) and written to `/app/sigterm_worker.py` in the container. The local path is resolved from the script's own location, so it runs from any directory. After 60 seconds `timeout` sends SIGTERM. The worker logs the signal, runs a cleanup step, and exits 0, so the job ends `COMPLETED`. If the worker is still running 30 seconds after SIGTERM, `timeout` sends SIGKILL and the job ends `FAILED`. If SIGTERM never arrives, the worker exits 1 after 300 seconds.
 
 ```python
+WORKER = Path(__file__).resolve().parent / "sigterm_worker.py"
+
 job = ns.Job(
     [
         "timeout",
@@ -208,14 +210,16 @@ job = ns.Job(
         "60",
         "python",
         "-u",
-        "-c",
-        WORKER,
+        "/app/sigterm_worker.py",
     ],
     image="python:3.12-slim",
     timeout="1h",
+    inject_files=[f"{WORKER}:/app/sigterm_worker.py"],
     name="sigterm-example",
 )
 ```
+
+The worker also runs locally: `python examples/signals/sigterm_worker.py`, then `kill -TERM <pid>`.
 
 `timeout` is PID 1 and forwards the signal to the worker. If the worker runs under `bash -lc`, use `exec python ...`: bash as PID 1 does not forward SIGTERM to its child. `--preserve-status` makes the job's exit code the worker's exit code instead of `124`. After the job finishes, the script reads `nebius ai job logs <id>` and exits non-zero when the `received SIGTERM` line is missing.
 
