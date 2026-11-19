@@ -10,6 +10,8 @@ Examples are grouped by use case. Settings other than a YAML path live in the Py
 | --- | --- |
 | [`examples/job_quickstart.py`](../examples/job_quickstart.py) | One `nvidia-smi` job, the [README](../README.md) recipe |
 | [`examples/from_yaml/`](../examples/from_yaml/) | That same recipe loaded from YAML |
+| [`examples/endpoint_quickstart.py`](../examples/endpoint_quickstart.py) | vLLM endpoint on an L40S: create, wait, call `/v1/chat/completions`, delete. YAML: [`vllm_endpoint.yaml`](../examples/from_yaml/vllm_endpoint.yaml) |
+| [`examples/notebook/endpoint_quickstart.ipynb`](../examples/notebook/endpoint_quickstart.ipynb) | The same endpoint in Jupyter, with the awaited twins and a separate delete cell |
 | [`examples/train/`](../examples/train/) | Axolotl fine-tune |
 | [`examples/finetuning/`](../examples/finetuning/) | Axolotl QLoRA fine-tune (`config.yaml` + S3 bucket mount) |
 | [`examples/parallel_jobs/`](../examples/parallel_jobs/) | Parallel Axolotl fine-tuning sweep across two models, saving outputs to S3 |
@@ -191,6 +193,58 @@ aws s3 rm --recursive "s3://<bucket>/matrix-multiply/<uuid>/" \
   --endpoint-url https://storage.eu-north1.nebius.cloud
 ```
 
+## Secrets, private images, retries, and spot caps
+
+Keep tokens in MysteryBox instead of `env`. `secrets` maps an env name to a secret id (`mbsec-…`, latest version) or a version id (`mbsecver-…`). The container gets the payload entry whose key matches the name. `registry_secret` is a secret version with `REGISTRY_USERNAME` and `REGISTRY_PASSWORD` for a private image. `retries` restarts a failed or preempted job. `spot_policy` caps the spot price instead of following it. The ids below are placeholders.
+
+```python
+job = ns.Job(
+    ["python", "train.py", "--config", "config.yaml"],
+    image="registry.example.com/team/trainer:1.4",
+    gpu="h100",
+    timeout="24h",
+    pricing="spot",
+    spot_policy="pricingpolicy-...",
+    retries=3,
+    working_dir="/workspace",
+    env={"WANDB_MODE": "offline"},
+    secrets={"HF_TOKEN": "mbsec-...", "WANDB_API_KEY": "mbsecver-..."},
+    registry_secret="mbsecver-...",
+    volumes=["s3://my-data:/workspace/data:ro"],
+)
+print(job.create(dry_run=True))   # shows secret ids, never values
+```
+
+An endpoint takes the same `working_dir`, `secrets`, `registry_secret`, and `spot_policy`. `token_secret` reads the bearer token from a secret whose payload has `AUTH_TOKEN`, so the token stays stable across creates. `Service.token` is then `None`; clients read the token from MysteryBox.
+
+```python
+endpoint = ns.Endpoint(
+    image="vllm/vllm-openai:v0.19.1",
+    port=8000,
+    gpu="l40s",
+    auth="token",
+    token_secret="mbsec-...",
+    secrets={"HF_TOKEN": "mbsec-..."},
+)
+```
+
+The same keys work in YAML documents.
+
+```yaml
+schema_version: 1
+kind: job
+image: registry.example.com/team/trainer:1.4
+command: ["python", "train.py"]
+gpu: h100
+timeout: 24h
+pricing: spot
+retries: 3
+working_dir: /workspace
+secrets:
+  HF_TOKEN: mbsec-...
+registry_secret: mbsecver-...
+```
+
 ## Reload a saved id
 
 `run.id` is the handle. `jobs.get` performs one get and does not create again.
@@ -203,13 +257,14 @@ print(loaded.status)
 
 ## Cancel
 
-`cancel` returns when the request is accepted. Poll `get` afterwards for `CANCELLED`.
+`cancel` returns when the request is accepted, with the job usually `CANCELLING`. Stopping the container can take minutes. `wait()` returns once it is `CANCELLED`.
 
 ```python
 payload = run.cancel()
 print(payload)
-later = run.get()
-print(later["status"]["state"])
+print(run.get()["status"]["state"])   # usually CANCELLING
+record = run.wait()
+print(record["status"]["state"])      # CANCELLED
 ```
 
 A local `wait` timeout leaves the job running:

@@ -1,6 +1,7 @@
 """One cloud job, and the collection addressed by id."""
 
 import sys
+import threading
 import time
 
 from .errors import Error, ValidationError, WaitTimeout
@@ -32,9 +33,15 @@ def monotonic() -> float:
     return time.monotonic()
 
 
-def sleep(seconds: float) -> None:
-    """Pause between polls. Tests replace this with a fake clock."""
-    time.sleep(seconds)
+def sleep(seconds: float, stop: threading.Event | None = None) -> None:
+    """Pause between polls. Return early when ``stop`` is set.
+
+    Tests replace this with a fake clock.
+    """
+    if stop is None:
+        time.sleep(seconds)
+        return
+    stop.wait(seconds)
 
 
 def state_of(record: dict[str, object] | None) -> str | None:
@@ -151,10 +158,9 @@ class Run:
     ) -> dict[str, object]:
         """Await the same poll as ``wait``.
 
-        Cancelling this await does not cancel the cloud job. The
-        progress handle is closed here, including when the await is
-        cancelled, so a worker that is still polling prints nothing
-        further.
+        Cancelling this await does not cancel the cloud job. It closes
+        the progress handle, so the worker prints nothing further and
+        stops polling once a ``get`` already in flight returns.
         """
 
         def work(progress: Progress) -> dict[str, object]:
@@ -169,7 +175,9 @@ class Run:
     def cancel(self, *, quiet: bool = False) -> dict[str, object]:
         """Request cancellation and return when it is accepted.
 
-        The payload does not claim the container has stopped.
+        The job is usually ``CANCELLING`` at that point. The payload
+        does not claim the container has stopped; poll ``get`` for
+        ``CANCELLED``.
         ``quiet=True`` suppresses the acceptance line for this call.
         """
         reject_running_loop("cancel_async")
@@ -311,8 +319,10 @@ class Run:
                 _give_up(follow, timeout, self._id)
             pause = POLL_SECONDS
             if deadline is not None:
-                pause = min(pause, deadline - monotonic())
-            sleep(pause)
+                pause = max(0.0, min(pause, deadline - monotonic()))
+            sleep(pause, progress.stopped)
+            # A cancelled await closes the handle: stop polling here.
+            progress.raise_if_abandoned()
             if _expired(deadline):
                 _give_up(follow, timeout, self._id)
 
@@ -407,7 +417,7 @@ class Jobs:
             ),
             progress,
         )
-        name = _record_name(record)
+        name = record_name(record)
         return Run(
             job_id,
             name=name,
@@ -428,7 +438,7 @@ def _sdk_transport(
     return SdkTransport(profile=profile, project=project)
 
 
-def _record_name(record: dict[str, object]) -> str:
+def record_name(record: dict[str, object]) -> str:
     metadata = record.get("metadata")
     if not isinstance(metadata, dict):
         return ""

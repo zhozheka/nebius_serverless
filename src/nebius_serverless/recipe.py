@@ -1,4 +1,4 @@
-"""Validate a job recipe and map it to a create request."""
+"""Validate a recipe and map a job to its create request."""
 
 import re
 import shlex
@@ -15,6 +15,7 @@ DISK_DEFAULT = "250Gi"
 SHM_LABEL = "16Gi"
 SHM_BYTES = 16 * 1024**3
 INJECT_FILE_MAX_BYTES = 64 * 1024
+WORKING_DIR_MAX = 128
 
 _IMAGE = re.compile(
     r"^[a-z0-9][a-z0-9._/-]*"
@@ -29,6 +30,9 @@ _S3_VOLUME = re.compile(
 )
 _MOUNT = re.compile(r"^([^:\s]+):(/[^:\s]+)(?::(ro|rw))?$")
 _INJECT_FILE = re.compile(r"^(.+):(/[^:\s]+)$")
+_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_SECRET_ID_PREFIX = "mbsec-"
+_SECRET_VERSION_PREFIX = "mbsecver-"
 _UNITS = {
     "Ki": 1024,
     "Mi": 1024**2,
@@ -41,18 +45,22 @@ _UNITS = {
 }
 
 
-def validate_command(command: object) -> tuple[str, ...]:
+def validate_command(
+    command: object,
+    *,
+    operation: str = "Job",
+) -> tuple[str, ...]:
     """Return a nonempty command list. A shell string is rejected."""
     if isinstance(command, str) or not isinstance(command, Sequence):
         raise ValidationError(
             "command must be a nonempty list of strings, "
             "not a shell string.",
-            operation="Job",
+            operation=operation,
         )
     if len(command) == 0:
         raise ValidationError(
             "command must be a nonempty list of strings.",
-            operation="Job",
+            operation=operation,
         )
     parts: list[str] = []
     for item in command:
@@ -60,7 +68,7 @@ def validate_command(command: object) -> tuple[str, ...]:
             raise ValidationError(
                 "command must be a nonempty list of strings, "
                 "not a shell string.",
-                operation="Job",
+                operation=operation,
             )
         parts.append(item)
     return tuple(parts)
@@ -73,13 +81,13 @@ def quoted_args(command: Sequence[str]) -> str | None:
     return " ".join(shlex.quote(part) for part in command[1:])
 
 
-def validate_image(image: object) -> str:
+def validate_image(image: object, *, operation: str = "Job") -> str:
     """Accept a tag or a sha256 digest and return it unchanged."""
     if not isinstance(image, str) or _IMAGE.fullmatch(image) is None:
         raise ValidationError(
             "image must be registry/path:tag or "
             "registry/path@sha256:<64 hex>.",
-            operation="Job",
+            operation=operation,
         )
     return image
 
@@ -126,12 +134,12 @@ def _parse_duration(value: str) -> int | float | None:
     return int(value)
 
 
-def validate_pricing(pricing: object) -> str:
+def validate_pricing(pricing: object, *, operation: str = "Job") -> str:
     """Accept on-demand or spot."""
     if pricing not in ("on-demand", "spot"):
         raise ValidationError(
             "pricing must be 'on-demand' or 'spot'.",
-            operation="Job",
+            operation=operation,
         )
     return pricing
 
@@ -140,35 +148,42 @@ def reject_spot_on_cpu(
     pricing: str,
     gpu: str | None,
     platform: str | None,
+    *,
+    operation: str = "Job",
 ) -> None:
     """Spot on a known CPU machine is outside this slice."""
     if pricing == "spot" and known_cpu(gpu, platform):
         raise UnsupportedFeature(
             "Spot pricing is not supported on CPU.",
-            operation="Job",
+            operation=operation,
         )
 
 
-def validate_optional_text(value: object, field: str) -> str | None:
+def validate_optional_text(
+    value: object,
+    field: str,
+    *,
+    operation: str = "Job",
+) -> str | None:
     """Return a nonempty string, or None when the field was omitted."""
     if value is None:
         return None
     if not isinstance(value, str) or value == "":
         raise ValidationError(
             f"{field} must be a nonempty string.",
-            operation="Job",
+            operation=operation,
         )
     return value
 
 
-def disk_bytes(disk: str) -> int:
+def disk_bytes(disk: str, *, operation: str = "Job") -> int:
     """Parse a CLI disk size such as ``500Gi`` into bytes."""
     match = _DISK.fullmatch(disk)
     if match is None:
         raise ValidationError(
             "disk must be an integer size with an optional unit, "
             "such as 500Gi.",
-            operation="Job",
+            operation=operation,
         )
     amount = int(match.group(1))
     unit = match.group(2)
@@ -176,30 +191,45 @@ def disk_bytes(disk: str) -> int:
     return amount * scale
 
 
-def validate_disk(disk: str | None) -> str | None:
+def validate_disk(
+    disk: str | None,
+    *,
+    operation: str = "Job",
+) -> str | None:
     """Pass a disk string through after checking it parses."""
     if disk is None:
         return None
-    disk_bytes(disk)
+    disk_bytes(disk, operation=operation)
     return disk
 
 
-def validate_volumes(volumes: object) -> tuple[str, ...]:
+def validate_volumes(
+    volumes: object,
+    *,
+    operation: str = "Job",
+) -> tuple[str, ...]:
     """Pass volume strings through. Objects are not looked up."""
     if volumes is None:
         return ()
     if isinstance(volumes, str) or not isinstance(volumes, Sequence):
         raise ValidationError(
             "volumes must be a list of mount strings.",
-            operation="Job",
+            operation=operation,
         )
     checked: list[str] = []
     for item in volumes:
         if not isinstance(item, str) or not _volume_ok(item):
             raise ValidationError(
                 "volumes must be source:container_path[:mode] or "
-                "s3://bucket:/container_path[:mode[:profile]].",
-                operation="Job",
+                "s3://bucket:/container_path[:mode].",
+                operation=operation,
+            )
+        s3_match = _S3_VOLUME.fullmatch(item)
+        if s3_match is not None and s3_match.group(4):
+            raise UnsupportedFeature(
+                "The :profile suffix on s3:// volumes is not supported. "
+                "Remove it to mount a bucket in the project.",
+                operation=operation,
             )
         checked.append(item)
     return tuple(checked)
@@ -216,20 +246,16 @@ def parse_volume(item: str) -> dict[str, str]:
     """Split one volume string into source, path, and mode."""
     s3_match = _S3_VOLUME.fullmatch(item)
     if s3_match is not None:
-        parsed = {
+        return {
             "source": f"s3://{s3_match.group(1)}",
             "container_path": s3_match.group(2),
             "mode": s3_match.group(3) or "rw",
         }
-        profile = s3_match.group(4)
-        if profile:
-            parsed["profile"] = profile
-        return parsed
     mount = _MOUNT.fullmatch(item)
     if mount is None:
         raise ValidationError(
             "volumes must be source:container_path[:mode] or "
-            "s3://bucket:/container_path[:mode[:profile]].",
+            "s3://bucket:/container_path[:mode].",
             operation="Job",
         )
     return {
@@ -239,42 +265,234 @@ def parse_volume(item: str) -> dict[str, str]:
     }
 
 
-def validate_env(env: object) -> tuple[tuple[str, str], ...]:
+def validate_env(
+    env: object,
+    *,
+    operation: str = "Job",
+) -> tuple[tuple[str, str], ...]:
     """Copy env pairs. Values stay on the recipe and off the plan."""
     if env is None:
         return ()
     if not isinstance(env, Mapping):
         raise ValidationError(
             "env must be a dict of strings.",
-            operation="Job",
+            operation=operation,
         )
     pairs: list[tuple[str, str]] = []
     for key, value in env.items():
         if not isinstance(key, str) or key == "":
             raise ValidationError(
                 "env keys must be nonempty strings.",
-                operation="Job",
+                operation=operation,
             )
         if not isinstance(value, str):
             raise ValidationError(
                 "env values must be strings.",
-                operation="Job",
+                operation=operation,
             )
         pairs.append((key, value))
     return tuple(pairs)
+
+
+def validate_retries(retries: object, *, operation: str = "Job") -> int:
+    """Restart attempts after a failure. ``0`` leaves the field unset."""
+    if isinstance(retries, bool) or not isinstance(retries, int):
+        raise ValidationError(
+            "retries must be a non-negative integer.",
+            operation=operation,
+        )
+    if retries < 0:
+        raise ValidationError(
+            "retries must be a non-negative integer.",
+            operation=operation,
+        )
+    return retries
+
+
+def validate_working_dir(
+    working_dir: object,
+    *,
+    operation: str = "Job",
+) -> str | None:
+    """A nonempty container path of at most 128 characters."""
+    value = validate_optional_text(
+        working_dir, "working_dir", operation=operation
+    )
+    if value is not None and len(value) > WORKING_DIR_MAX:
+        raise ValidationError(
+            f"working_dir must be at most {WORKING_DIR_MAX} characters.",
+            operation=operation,
+        )
+    return value
+
+
+def validate_secret_ref(
+    value: object,
+    field: str,
+    *,
+    operation: str = "Job",
+) -> str:
+    """Accept a MysteryBox secret id or secret version id."""
+    if not isinstance(value, str) or not (
+        value.startswith(_SECRET_ID_PREFIX)
+        or value.startswith(_SECRET_VERSION_PREFIX)
+    ):
+        raise ValidationError(
+            f"{field} must be a MysteryBox secret id (mbsec-...) "
+            "or secret version id (mbsecver-...).",
+            operation=operation,
+        )
+    return value
+
+
+def validate_registry_secret(
+    registry_secret: object,
+    *,
+    operation: str = "Job",
+) -> str | None:
+    """A MysteryBox secret version with the registry username and
+    password."""
+    if registry_secret is None:
+        return None
+    if not isinstance(registry_secret, str) or not registry_secret.startswith(
+        _SECRET_VERSION_PREFIX
+    ):
+        raise ValidationError(
+            "registry_secret must be a MysteryBox secret version id "
+            "(mbsecver-...).",
+            operation=operation,
+        )
+    return registry_secret
+
+
+def secret_ref(value: str) -> dict[str, str]:
+    """Map a MysteryBox id to the ``MysteryBoxSecretRef`` field it fills."""
+    if value.startswith(_SECRET_VERSION_PREFIX):
+        return {"version_id": value}
+    return {"secret_id": value}
+
+
+def validate_secrets(
+    secrets: object,
+    env: Sequence[tuple[str, str]],
+    *,
+    operation: str = "Job",
+) -> tuple[tuple[str, str], ...]:
+    """Copy env-name to MysteryBox-id pairs. Names must not repeat env."""
+    if secrets is None:
+        return ()
+    if not isinstance(secrets, Mapping):
+        raise ValidationError(
+            "secrets must be a dict of env names to MysteryBox ids.",
+            operation=operation,
+        )
+    env_keys = {key for key, _value in env}
+    pairs: list[tuple[str, str]] = []
+    for key, value in secrets.items():
+        if not isinstance(key, str) or _ENV_NAME.fullmatch(key) is None:
+            raise ValidationError(
+                "secrets keys must be env names such as HF_TOKEN.",
+                operation=operation,
+            )
+        if key in env_keys:
+            raise ValidationError(
+                f"{key} is set in both env and secrets.",
+                operation=operation,
+            )
+        ref = validate_secret_ref(value, "secrets values", operation=operation)
+        pairs.append((key, ref))
+    return tuple(pairs)
+
+
+def validate_spot_policy(
+    spot_policy: object,
+    pricing: str,
+    *,
+    operation: str = "Job",
+) -> str | None:
+    """A pricing policy id caps the spot price. It requires spot."""
+    value = validate_optional_text(
+        spot_policy, "spot_policy", operation=operation
+    )
+    if value is not None and pricing != "spot":
+        raise ValidationError(
+            "spot_policy requires pricing='spot'.",
+            operation=operation,
+        )
+    return value
+
+
+def describe_extras(
+    description: dict[str, object],
+    *,
+    working_dir: str | None,
+    secrets: Sequence[tuple[str, str]],
+    registry_secret: str | None,
+    spot_policy: str | None,
+) -> None:
+    """Add the optional fields a dry run shows only when they are set."""
+    if working_dir is not None:
+        description["working_dir"] = working_dir
+    if secrets:
+        description["secrets"] = dict(secrets)
+    if registry_secret is not None:
+        description["registry_secret"] = registry_secret
+    if spot_policy is not None:
+        description["spot_policy"] = spot_policy
+
+
+def spec_extras(
+    spec: dict[str, object],
+    *,
+    pricing: str,
+    env: Sequence[tuple[str, str]],
+    working_dir: str | None,
+    secrets: Sequence[tuple[str, str]],
+    registry_secret: str | None,
+    spot_policy: str | None,
+) -> None:
+    """Fill env, pricing, and the optional fields shared by jobs and
+    endpoints."""
+    variables: list[dict[str, object]] = [
+        {"name": key, "value": value} for key, value in env
+    ]
+    variables.extend(
+        {"name": key, "mysterybox_secret": secret_ref(ref)}
+        for key, ref in secrets
+    )
+    if variables:
+        spec["environment_variables"] = variables
+    if working_dir is not None:
+        spec["working_dir"] = working_dir
+    if registry_secret is not None:
+        spec["registry_credentials"] = {
+            "mysterybox_secret_version": registry_secret
+        }
+    if pricing == "spot":
+        spec["preemptible"] = True
+        if spot_policy is not None:
+            spec["spot_pricing_policy"] = spot_policy
+        else:
+            spec["follows_spot_price"] = True
 
 
 def check_identity(
     gpu: str | None,
     platform: str | None,
     preset: str | None,
+    *,
+    operation: str = "Job",
 ) -> None:
     """Validate alias names and the platform/preset pair."""
-    validate_gpu_name(gpu, platform)
-    validate_platform(platform, preset)
+    validate_gpu_name(gpu, platform, operation=operation)
+    validate_platform(platform, preset, operation=operation)
 
 
-def validate_inject_files(inject_files: object) -> tuple[str, ...]:
+def validate_inject_files(
+    inject_files: object,
+    *,
+    operation: str = "Job",
+) -> tuple[str, ...]:
     """Pass inject-file strings through. Files are read on create."""
     if inject_files is None:
         return ()
@@ -284,7 +502,7 @@ def validate_inject_files(inject_files: object) -> tuple[str, ...]:
         raise ValidationError(
             "inject_files must be a list of "
             "local_path:container_path strings.",
-            operation="Job",
+            operation=operation,
         )
     items: list[str] = []
     for item in inject_files:
@@ -292,7 +510,7 @@ def validate_inject_files(inject_files: object) -> tuple[str, ...]:
             raise ValidationError(
                 "inject_files must be local_path:container_path, "
                 "matching the CLI --inject-file form.",
-                operation="Job",
+                operation=operation,
             )
         items.append(item)
     return tuple(items)
@@ -354,6 +572,11 @@ def describe(
     env_keys: Sequence[str],
     name: str,
     disk: str | None,
+    retries: int = 0,
+    working_dir: str | None = None,
+    secrets: Sequence[tuple[str, str]] = (),
+    registry_secret: str | None = None,
+    spot_policy: str | None = None,
 ) -> dict[str, object]:
     """Build the dry-run description. Env values are not included."""
     description: dict[str, object] = {
@@ -379,6 +602,15 @@ def describe(
     description["name"] = name
     description["disk"] = disk if disk is not None else DISK_DEFAULT
     description["shm"] = SHM_LABEL
+    if retries:
+        description["retries"] = retries
+    describe_extras(
+        description,
+        working_dir=working_dir,
+        secrets=secrets,
+        registry_secret=registry_secret,
+        spot_policy=spot_policy,
+    )
     return description
 
 
@@ -397,6 +629,11 @@ def request_body(
     env: Sequence[tuple[str, str]],
     name: str,
     disk: str | None,
+    retries: int = 0,
+    working_dir: str | None = None,
+    secrets: Sequence[tuple[str, str]] = (),
+    registry_secret: str | None = None,
+    spot_policy: str | None = None,
 ) -> dict[str, object]:
     """Map a recipe to the create body the transport sends."""
     spec: dict[str, object] = {
@@ -417,13 +654,17 @@ def request_body(
         spec["volumes"] = [parse_volume(item) for item in volumes]
     if inject_files:
         spec["injected_files"] = list(inject_files)
-    if env:
-        spec["environment_variables"] = [
-            {"name": key, "value": value} for key, value in env
-        ]
-    if pricing == "spot":
-        spec["preemptible"] = True
-        spec["follows_spot_price"] = True
+    if retries:
+        spec["restart_attempts"] = retries
+    spec_extras(
+        spec,
+        pricing=pricing,
+        env=env,
+        working_dir=working_dir,
+        secrets=secrets,
+        registry_secret=registry_secret,
+        spot_policy=spot_policy,
+    )
     return {
         "metadata": {"parent_id": project, "name": name},
         "spec": spec,

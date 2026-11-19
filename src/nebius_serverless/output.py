@@ -14,7 +14,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import TypeVar
 
-from .errors import Error
+from .errors import Error, recovery_for
 from .log import emit, plain_text, presentation_mode
 from .status import Status
 
@@ -41,6 +41,16 @@ _LOG_FACT = {
         "Cancel accepted",
         "cancel_accepted",
     ),
+    "stop_accepted": (
+        logging.INFO,
+        "Stop accepted",
+        "stop_accepted",
+    ),
+    "delete_accepted": (
+        logging.INFO,
+        "Delete accepted",
+        "delete_accepted",
+    ),
     "local_timeout": (
         logging.INFO,
         "Local waiting ended",
@@ -51,18 +61,35 @@ _FAILED = frozenset({"FAILED", "ERROR"})
 _FAILURE_RECOVERY = (
     "Reload it with jobs.get(id). Do not send a second create."
 )
+_ENDPOINT_FAILURE_RECOVERY = (
+    "The endpoint still bills until delete. "
+    "Reload it with endpoints.get(id), or call delete."
+)
 
 T = TypeVar("T")
 
 
+class Abandoned(Exception):
+    """The awaited call was cancelled, so its worker stops polling.
+
+    Raised inside the worker thread only. The caller has already
+    received ``CancelledError``. Nothing remote is cancelled or deleted.
+    """
+
+
 class Progress:
-    """Progress for one public call. Closing it does not cancel a job."""
+    """Progress for one public call. Closing it does not cancel a job.
+
+    ``stopped`` is set on close. An awaited call closes its handle when
+    the await is cancelled, which lets the worker thread stop polling.
+    """
 
     def __init__(self, *, quiet: bool, logger_name: str) -> None:
         self.quiet = quiet
         self.logger_name = logger_name
         self.operation_id = uuid.uuid4().hex
         self.closed = False
+        self.stopped = threading.Event()
         self._stream = sys.stderr
         self._console: object | None = None
         self._console_interactive = False
@@ -82,8 +109,14 @@ class Progress:
             if self.closed:
                 return
             self.closed = True
+            self.stopped.set()
             self._stop_spinner()
             _coordinator.release(self)
+
+    def raise_if_abandoned(self) -> None:
+        """Stop a polling worker whose awaited caller has gone away."""
+        if self.closed:
+            raise Abandoned()
 
     def demote(self) -> None:
         """Leave the spinner and use append-only lines. Lock is held."""
@@ -151,6 +184,12 @@ class Progress:
             return
         if fact.kind == "cancel_accepted":
             self._write(self._visible(_cancel_parts(fact.job_id)))
+            return
+        if fact.kind == "stop_accepted":
+            self._write(self._visible(_stop_parts(fact.job_id)))
+            return
+        if fact.kind == "delete_accepted":
+            self._write(self._visible(_delete_parts(fact.job_id)))
             return
         if fact.kind == "local_timeout":
             self._stop_spinner()
@@ -305,9 +344,16 @@ _coordinator = _Coordinator()
 class Follow:
     """How one ``wait`` renders polls. The handle is shared."""
 
-    def __init__(self, handle: Progress, job_id: str) -> None:
+    def __init__(
+        self,
+        handle: Progress,
+        job_id: str,
+        *,
+        noun: str = "job",
+    ) -> None:
         self._handle = handle
         self._job_id = job_id
+        self._noun = noun
         self._previous: str | None = None
 
     def poll(
@@ -318,12 +364,17 @@ class Follow:
         attempt: int,
         duration_ms: int,
         terminal: bool,
+        detail: str | None = None,
     ) -> None:
-        """Log this poll, then render when the handle is still open."""
+        """Log this poll, then render when the handle is still open.
+
+        ``detail`` is shown under the terminal line, such as an
+        endpoint URL.
+        """
         emit(
             self._handle.logger_name,
             logging.DEBUG,
-            "Polled job",
+            f"Polled {self._noun}",
             event="poll",
             operation_id=self._handle.operation_id,
             job_id=self._job_id,
@@ -338,6 +389,8 @@ class Follow:
                     state=state,
                     previous=self._previous,
                     observed_seconds=elapsed,
+                    message=detail,
+                    noun=self._noun,
                 ),
                 self._handle,
             )
@@ -351,6 +404,7 @@ class Follow:
                     state=state,
                     previous=self._previous,
                     observed_seconds=elapsed,
+                    noun=self._noun,
                 ),
                 self._handle,
             )
@@ -369,7 +423,8 @@ class Follow:
                 kind="local_timeout",
                 job_id=self._job_id,
                 observed_seconds=seconds,
-                message=timeout_text(self._job_id, seconds),
+                message=timeout_text(self._job_id, seconds, self._noun),
+                noun=self._noun,
             ),
             self._handle,
         )
@@ -380,12 +435,18 @@ def call_progress(
     quiet: bool,
     logger_name: str,
     work: Callable[[Progress], T],
+    noun: str = "job",
 ) -> T:
-    """Run ``work`` with a handle, then close that handle."""
+    """Run ``work`` with a handle, then close that handle.
+
+    For an endpoint call, a default recovery hint is rewritten to name
+    ``endpoints.get`` before it is shown.
+    """
     progress = Progress(quiet=quiet, logger_name=logger_name)
     try:
         return work(progress)
     except Error as exc:
+        _retarget(exc, noun)
         if exc.code != "wait_timeout":
             show_failure(progress, exc)
         raise
@@ -398,6 +459,7 @@ async def call_progress_async(
     quiet: bool,
     logger_name: str,
     work: Callable[[Progress], T],
+    noun: str = "job",
 ) -> T:
     """Share ``work``'s handle with the worker and close it here.
 
@@ -410,6 +472,7 @@ async def call_progress_async(
     try:
         return await asyncio.to_thread(work, progress)
     except Error as exc:
+        _retarget(exc, noun)
         if exc.code != "wait_timeout":
             show_failure(progress, exc)
         raise
@@ -417,11 +480,20 @@ async def call_progress_async(
         progress.close()
 
 
+def _retarget(exc: Error, noun: str) -> None:
+    """Swap a class-default recovery for one that names ``noun``."""
+    if exc.recovery != type(exc)._recovery:
+        return
+    replacement = recovery_for(exc.code, noun)
+    if replacement is not None:
+        exc.recovery = replacement
+
+
 def report(fact: Status, handle: Progress) -> None:
     """Log one fact, then render it when the handle is open."""
     level, message, event = _LOG_FACT[fact.kind]
     if fact.kind == "transition" and fact.previous is None:
-        message = "Observed job state"
+        message = f"Observed {fact.noun} state"
         event = "state_observed"
     emit(
         handle.logger_name,
@@ -551,6 +623,7 @@ def _record_lines(
     if state is not None:
         lines.append([("  ", ""), (state, _state_style(state))])
     for block in (
+        _url_lines(record),
         _spec_lines(record),
         _time_lines(record),
         _instance_lines(record),
@@ -603,6 +676,23 @@ def _spec_lines(
         _add(rows, "timeout", _duration(timeout))
     _add(rows, "subnet", _text(spec.get("subnet_id")))
     return [_field(key, value) for key, value in rows]
+
+
+def _url_lines(
+    record: dict[str, object],
+) -> list[list[tuple[str, str]]]:
+    """Managed endpoint URLs from ``status.public_endpoints``."""
+    status = _mapping(record.get("status"))
+    if status is None:
+        return []
+    items = status.get("public_endpoints")
+    if not isinstance(items, list):
+        return []
+    return [
+        _field("url", item)
+        for item in items
+        if isinstance(item, str) and item != ""
+    ]
 
 
 def _time_lines(
@@ -821,10 +911,17 @@ def _whole(value: object) -> int | None:
     return None
 
 
-def timeout_text(job_id: str, seconds: float) -> str:
-    """The three lines for a local wait that did not cancel the job."""
+def timeout_text(job_id: str, seconds: float, noun: str = "job") -> str:
+    """The three lines for a local wait that did not stop the resource."""
     shown = format_seconds(seconds)
     identity = plain_text(job_id)
+    if noun == "endpoint":
+        return (
+            f"Stopped waiting for {identity} after {shown}.\n"
+            "The endpoint is unchanged and still bills.\n"
+            "Reload it with endpoints.get(id), "
+            "or explicitly request deletion."
+        )
     return (
         f"Stopped waiting for {identity} after {shown}.\n"
         "The job may still be running remotely.\n"
@@ -863,7 +960,7 @@ def _submitted_parts(
     job_id = plain_text(fact.job_id)
     name = plain_text(fact.name)
     parts = [
-        ("Submitted job ", "dim"),
+        (f"Submitted {fact.noun} ", "dim"),
         (job_id, "bold cyan"),
     ]
     if name:
@@ -920,6 +1017,20 @@ def _cancel_parts(job_id: str) -> list[tuple[str, str]]:
     ]
 
 
+def _stop_parts(endpoint_id: str) -> list[tuple[str, str]]:
+    return [
+        ("Stop accepted for ", "dim"),
+        (plain_text(endpoint_id), "bold cyan"),
+    ]
+
+
+def _delete_parts(endpoint_id: str) -> list[tuple[str, str]]:
+    return [
+        ("Delete accepted for ", "dim"),
+        (plain_text(endpoint_id), "bold cyan"),
+    ]
+
+
 def _at(
     stream: object,
     seconds: float | None,
@@ -938,8 +1049,12 @@ def _terminal_parts(
     job_id = plain_text(fact.job_id)
     state = plain_text(fact.state or "")
     when = _at(stream, fact.observed_seconds)
+    endpoint = fact.noun == "endpoint"
     if state in _FAILED:
         mark = _bad_mark(stream)
+        recovery = (
+            _ENDPOINT_FAILURE_RECOVERY if endpoint else _FAILURE_RECOVERY
+        )
         return [
             (f"{mark} ", "bold red"),
             (job_id, "bold cyan"),
@@ -947,17 +1062,21 @@ def _terminal_parts(
             (state, "bold red"),
             *when,
             ("\n  ", ""),
-            (_FAILURE_RECOVERY, "dim"),
+            (recovery, "dim"),
         ]
-    if state == "COMPLETED":
+    if state == "COMPLETED" or (endpoint and state == "RUNNING"):
         mark = _ok_mark(stream)
-        return [
+        parts = [
             (f"{mark} ", "bold green"),
             (job_id, "bold cyan"),
             (" ", ""),
-            ("COMPLETED", "bold green"),
+            (state, "bold green"),
             *when,
         ]
+        if fact.message:
+            parts.append(("\n  ", ""))
+            parts.append((plain_text(fact.message), ""))
+        return parts
     return [
         (job_id, "bold cyan"),
         (" ", ""),

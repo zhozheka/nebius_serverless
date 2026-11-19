@@ -75,23 +75,33 @@ def known_cpu(gpu: str | None, platform: str | None) -> bool:
     return gpu is None
 
 
-def validate_gpu_name(gpu: str | None, platform: str | None) -> None:
+def validate_gpu_name(
+    gpu: str | None,
+    platform: str | None,
+    *,
+    operation: str = "Job",
+) -> None:
     """Reject ``gpu='cpu'`` and unknown aliases when no platform is set."""
     if gpu == "cpu":
         raise ValidationError(
-            "gpu='cpu' is invalid. Omit gpu for a CPU job.",
-            operation="Job",
+            "gpu='cpu' is invalid. Omit gpu for a CPU machine.",
+            operation=operation,
         )
     if platform is not None or gpu is None:
         return
     if gpu not in KNOWN_GPUS:
         raise ValidationError(
             f"Unknown gpu alias {gpu!r}.",
-            operation="Job",
+            operation=operation,
         )
 
 
-def validate_platform(platform: str | None, preset: str | None) -> None:
+def validate_platform(
+    platform: str | None,
+    preset: str | None,
+    *,
+    operation: str = "Job",
+) -> None:
     """An unknown platform id requires an explicit preset."""
     if platform is None:
         return
@@ -99,7 +109,7 @@ def validate_platform(platform: str | None, preset: str | None) -> None:
         return
     raise ValidationError(
         f"Unknown platform {platform!r} requires preset.",
-        operation="Job",
+        operation=operation,
     )
 
 

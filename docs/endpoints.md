@@ -1,6 +1,6 @@
 # Endpoints
 
-30 October 2026. Proposal for discussion. This is the user-interface contract to implement. Nothing in this file is in the package yet. The current jobs surface stays as described in [reference.md](reference.md).
+Reference for the endpoints surface of `nebius_serverless`. It implements the 30 October 2026 proposal. Differences from that draft are listed under [Changes from the proposal](#changes-from-the-proposal). The jobs surface is in [reference.md](reference.md).
 
 An endpoint is a container that stays up and answers on a managed URL. A job runs a command and finishes. Creating an endpoint allocates the machine until `delete`. Closing the process does not delete it.
 
@@ -38,7 +38,7 @@ record = service.wait()
 print(service.url, record["status"]["state"])
 ```
 
-`service.token` is the bearer token Nebius returns on create. A later `endpoints.get` does not have it. `service.url` is the managed `https://` URL. `wait` returns when that URL is present, or when the endpoint has stopped or failed. `RUNNING` means the platform workload is up. It does not mean the model answers yet. Poll the application's own route before sending traffic.
+`service.token` is the bearer token sent on create. With `auth="token"` and no `token=`, the client generates a random token for each create, as `nebius ai endpoint create --auth token` does. A later `endpoints.get` does not have it. `service.url` is the managed `https://` URL. `wait` returns when that URL is present, or when the endpoint has stopped or failed. `RUNNING` means the platform workload is up. It does not mean the model answers yet. Poll the application's own route before sending traffic.
 
 Callers send HTTP themselves. This client does not wrap inference.
 
@@ -102,6 +102,8 @@ await service.delete_async()
 
 Calling `endpoint.create()` from inside a running event loop raises `ValidationError` and names `create_async`.
 
+A runnable version of this recipe, which also polls `/v1/models`, sends one chat request, and deletes the endpoint in `finally`, is [`examples/endpoint_quickstart.py`](../examples/endpoint_quickstart.py). The YAML is [`examples/from_yaml/vllm_endpoint.yaml`](../examples/from_yaml/vllm_endpoint.yaml).
+
 ## Contract
 
 | Name | Role |
@@ -112,9 +114,11 @@ Calling `endpoint.create()` from inside a running event loop raises `ValidationE
 
 Constructing an `Endpoint`, loading YAML, or importing the package does not authenticate, upload, or create. A second `create()` starts another endpoint and returns another `Service`. Each one bills until its own `delete`.
 
-Synchronous methods are the script API. Inside a running event loop they raise `ValidationError` and name the awaited twin (`create_async`, `get_async`, `wait_async`, `delete_async`, `endpoints.get_async`). Cancelling an await does not delete the endpoint. Only `delete` / `delete_async` requests deletion.
+Synchronous methods are the script API. Inside a running event loop they raise `ValidationError` and name the awaited twin (`create_async`, `get_async`, `wait_async`, `stop_async`, `delete_async`, `endpoints.get_async`). Cancelling an await does not delete the endpoint. Only `delete` / `delete_async` requests deletion.
 
 This package does not stream endpoint logs. Log access stays on the CLI and the web console.
+
+`create`, `get`, `wait`, `delete`, and `endpoints.get`, plus their awaited twins, print progress on stderr the same way as the job calls ([Progress and diagnostics](reference.md#progress-and-diagnostics)). `wait` ends with the URL under the `RUNNING` line. `quiet=True` is keyword-only and suppresses progress for that call only. `create(dry_run=True)` prints nothing.
 
 ### `Endpoint`
 
@@ -132,11 +136,17 @@ ns.Endpoint(
     token=None,
     subnet_id=None,
     volumes=None,
+    inject_files=None,
     env=None,
     name=None,
     disk=None,
     profile=None,
     project=None,
+    token_secret=None,
+    working_dir=None,
+    secrets=None,
+    registry_secret=None,
+    spot_policy=None,
 )
 ```
 
@@ -150,18 +160,24 @@ ns.Endpoint(
 | `preset` | no | Explicit preset id. When omitted, the client sends the minimal preset for the chosen platform. An unknown platform id requires `preset`. |
 | `pricing` | no | `"on-demand"` (default) or `"spot"`. `"spot"` is preemptible and follows the current price. `"spot"` on CPU raises `UnsupportedFeature`. Any other value raises `ValidationError`. |
 | `auth` | no | `"none"` (default) or `"token"`. `"token"` requires one HTTP port, which this contract already requires. Any other value raises `ValidationError`. |
-| `token` | no | Bearer token sent when `auth="token"`. When omitted, Nebius generates one and create copies it onto `Service.token`. The value is left out of dry-run descriptions and exception text. |
+| `token` | no | Bearer token sent when `auth="token"`. Setting it with `auth="none"` raises `ValidationError`. When omitted, the client generates a random token on each create and sets `Service.token`. The value is left out of `repr`, dry-run descriptions, and exception text. |
 | `subnet_id` | no | Sent when set. Omit it when the project has a single subnet. |
-| `volumes` | no | Mount strings, passed through, same form as `Job`. |
-| `env` | no | `dict[str, str]`. Values are sent on create and left out of dry-run descriptions and exception text. |
+| `volumes` | no | Mount strings, passed through, same form as `Job`. The `s3://` `:profile` suffix raises `UnsupportedFeature`. |
+| `inject_files` | no | `local_path:container_path` strings, same form and 64 KiB limit as `Job`. Files are read on create. |
+| `env` | no | `dict[str, str]`. Values are sent on create and left out of dry-run descriptions and exception text. Use `secrets` for tokens. |
 | `name` | no | Console label (`metadata.name`). When omitted, the client generates `endpoint-` plus 12 hex characters. It is not a lookup key. |
 | `disk` | no | CLI size string, passed through, such as `500Gi`. When omitted, the request uses `250Gi`. |
 | `profile` | no | Nebius SDK profile name. When omitted, the active profile is used. |
 | `project` | no | Project id. Overrides the profile's project. |
+| `token_secret` | no | MysteryBox secret id (`mbsec-…`) or version id (`mbsecver-…`) whose payload has `AUTH_TOKEN`. Sent as `auth_token_mysterybox_secret`. Requires `auth="token"` and cannot be combined with `token`; either mistake raises `ValidationError`. No token is generated, `Service.token` is `None`, and the dry-run description shows `"token": "secret"` with the id. |
+| `working_dir` | no | Container working directory, at most 128 characters. When omitted, the image `WORKDIR` applies. |
+| `secrets` | no | `dict[str, str]` of env name to MysteryBox id: a secret id (`mbsec-…`, latest version) or a version id (`mbsecver-…`). The container gets the payload entry whose key matches the name, or the first entry. Names follow `[A-Za-z_][A-Za-z0-9_]*` and must not repeat an `env` key. Ids are shown in dry-run descriptions; values never reach the client. |
+| `registry_secret` | no | MysteryBox secret version id (`mbsecver-…`) for a private image registry. The payload must have `REGISTRY_USERNAME` and `REGISTRY_PASSWORD`. A secret id (`mbsec-…`) raises `ValidationError`. |
+| `spot_policy` | no | Pricing policy id that caps the spot price. Requires `pricing="spot"`, otherwise `ValidationError`. Sent as `pricing_model.spot_pricing_policy` in place of `follows_spot_price`: the VM is preempted when the spot price exceeds the cap. |
 
-There is no `timeout` parameter. An endpoint has no job deadline. Shared memory follows the job adapter: `16Gi`. It is not a parameter.
+There is no `timeout` or `retries` parameter. An endpoint has no job deadline, and the endpoint API has no restart count. Shared memory follows the job adapter: `16Gi`. It is not a parameter.
 
-After construction these attributes are readable: `command`, `image`, `port`, `gpu`, `platform`, `preset`, `pricing`, `auth`, `token`, `subnet_id`, `volumes`, `env`, `name`, `disk`, `profile`, `project`. `command` is `None` when the image entrypoint is kept. `env` is a tuple of `(key, value)` pairs.
+After construction these attributes are readable: `command`, `image`, `port`, `gpu`, `platform`, `preset`, `pricing`, `auth`, `token`, `subnet_id`, `volumes`, `inject_files`, `env`, `name`, `disk`, `profile`, `project`, `token_secret`, `working_dir`, `secrets`, `registry_secret`, `spot_policy`. `token` is the value passed in, or `None` when it will be generated or read from `token_secret`. `command` is `None` when the image entrypoint is kept. `env` and `secrets` are tuples of `(key, value)` pairs.
 
 ### `Endpoint.from_yaml`
 
@@ -171,22 +187,22 @@ ns.Endpoint.from_yaml(path) -> Endpoint
 
 Load a schema-version-1 endpoint document. Relative strings inside the document are not expanded.
 
-Allowed keys: `schema_version`, `kind`, `image`, `command`, `port`, `gpu`, `platform`, `preset`, `pricing`, `auth`, `token`, `subnet_id`, `volumes`, `env`, `name`, `disk`.
+Allowed keys: `schema_version`, `kind`, `image`, `command`, `port`, `gpu`, `platform`, `preset`, `pricing`, `auth`, `token`, `subnet_id`, `volumes`, `env`, `name`, `disk`, `token_secret`, `working_dir`, `secrets`, `registry_secret`, `spot_policy`.
 
-`schema_version` must be `1` and `kind` must be `endpoint`. `command` may be omitted. When present it is a list of strings. `port` is an integer. `gpu` may be omitted for CPU. `gpu: cpu` is rejected. Unknown keys, duplicate keys, aliases, anchors, tags, merge keys, and a document over 1 MiB are rejected. `token` and `env` values are accepted and then treated like the Python values: sent on create, omitted from dry-run descriptions and exception text.
+`schema_version` must be `1` and `kind` must be `endpoint`. A `kind: job` document is rejected and points at `Job.from_yaml`; `Job.from_yaml` does the same for `kind: endpoint`. `command` may be omitted. When present it is a list of strings. `port` is an integer. `gpu` may be omitted for CPU. `gpu: cpu` is rejected. Unknown keys, duplicate keys, aliases, anchors, tags, merge keys, and a document over 1 MiB are rejected. `token` and `env` values are accepted and then treated like the Python values: sent on create, omitted from dry-run descriptions and exception text.
 
 ### `Endpoint.create`
 
 ```python
-endpoint.create(dry_run=False, *, region=None, project=None) -> Service
-endpoint.create(dry_run=True, *, region=None, project=None) -> dict
+endpoint.create(dry_run=False, *, region=None, project=None, quiet=False) -> Service
+endpoint.create(dry_run=True, *, region=None, project=None, quiet=False) -> dict
 ```
 
 `create()` blocks until Nebius has accepted the endpoint and the id is known, then returns a `Service`. It does not wait until the URL is ready. Acceptance is not readiness.
 
 `create(dry_run=True)` builds the request, returns that description, and does not call create. Project and region come from `project=` / `region=` when passed, otherwise from the active SDK profile (`profile=` on the `Endpoint` selects it). A missing or ambiguous project or region raises `ValidationError` before create.
 
-The description includes `image`, `command` and `args` when a command was set, `port`, `project`, `region`, `platform`, `preset`, `pricing`, `auth`, `subnet_id` when set, `volumes` when set, `env` (key names only), `name`, `disk`, and `shm`. It does not include env values or the token. When `auth="token"` and `token` was omitted, the description says the token is generated.
+The description includes `image`, `command` and `args` when a command was set, `port`, `project`, `region`, `platform`, `preset`, `pricing`, `auth`, `token` when `auth="token"`, `subnet_id` when set, `volumes` when set, `inject_files` when set, `env` (key names only), `name`, `disk`, and `shm`. `token` is the word `"provided"` or `"generated"`, never the value. Env values and inject-file contents are not included.
 
 `region` resolves a `gpu` alias. `project` on this call overrides `Endpoint.project`.
 
@@ -195,7 +211,7 @@ An optional `transport=` keyword replaces the Nebius SDK client. Tests use it. S
 ### `Endpoint.create_async`
 
 ```python
-await endpoint.create_async(dry_run=False, *, region=None, project=None)
+await endpoint.create_async(dry_run=False, *, region=None, project=None, quiet=False)
 ```
 
 Same call as `create`. Cancelling the await leaves the endpoint running when create was already accepted.
@@ -211,14 +227,14 @@ Property reads do not perform I/O.
 | `id` | Nebius endpoint id. |
 | `name` | Display name from the recipe, or from the fetched metadata. Lookup ignores it. |
 | `status` | Raw `status.state` string. Before the first successful fetch, this is the state from the create response, or `None` when create did not include one. |
-| `record` | Last fetched endpoint JSON, or `None` before the first successful `get` or `wait`. |
+| `record` | Last fetched endpoint JSON, or `None` before the first successful `get` or `wait`. `spec.auth_token` is removed from fetched JSON. |
 | `url` | Managed `https://` URL for the HTTP port, or `None` until a fetch has seen one. |
 | `token` | Bearer token from this create call, or `None` on a service loaded by `endpoints.get` and when `auth="none"`. |
 
 ### `Service.get`
 
 ```python
-service.get() -> dict
+service.get(*, quiet=False) -> dict
 ```
 
 One `nebius ai endpoint get`. Returns the endpoint JSON. Stores that JSON on `record` and `status`, and sets `url` when `status.public_endpoints` contains an `https://` URL. Does not change `token`.
@@ -228,10 +244,10 @@ One `nebius ai endpoint get`. Returns the endpoint JSON. Stores that JSON on `re
 ### `Service.wait`
 
 ```python
-service.wait(timeout=None) -> dict
+service.wait(timeout=None, *, quiet=False) -> dict
 ```
 
-Polls `get` about once a second until the endpoint is ready or will not become ready, then returns that JSON.
+Polls `get` about every 5 seconds until the endpoint is ready or will not become ready, then returns that JSON.
 
 Ready means `status.state` is `RUNNING` and `url` is set. `ERROR` and `STOPPED` end the wait as well. The caller reads `service.status` and `service.url`. `PROVISIONING`, `STARTING`, `IMAGE_PULLING`, `STOPPING`, and `DELETING` keep the poll going. `RUNNING` without a URL keeps the poll going.
 
@@ -239,25 +255,42 @@ Ready means `status.state` is `RUNNING` and `url` is set. `ERROR` and `STOPPED` 
 
 This wait does not request the application's HTTP route. A server that is still loading a model can be `RUNNING` with a URL and still refuse traffic.
 
+### `Service.stop`
+
+```python
+service.stop(*, quiet=False) -> dict
+```
+
+Requests a stop and returns `{"id": ..., "resource_id": ...}` when the request is accepted. The endpoint keeps its id and configuration; only `delete` removes it. The state passes through `STOPPING` to `STOPPED`; poll `get` to see it. Do not use `wait` for this: right after the stop is accepted the state can still be `RUNNING` with a URL, and `wait` returns on that.
+
 ### `Service.delete`
 
 ```python
-service.delete() -> dict
+service.delete(*, quiet=False) -> dict
 ```
 
-Requests deletion and returns when the request is accepted. The payload does not claim the machine has stopped or that billing has ended. A later `get` reports `DELETING` or a missing id once Nebius has finished.
+Requests deletion and returns `{"id": ..., "resource_id": ...}` when the request is accepted. The payload does not claim the machine has stopped or that billing has ended. A later `get` reports `DELETING` or a missing id once Nebius has finished.
 
 There is no `cancel`. Cancellation is the job verb. An endpoint is removed with `delete`.
+
+### `Service.display`
+
+```python
+service.display() -> None
+```
+
+Prints the last fetched record on stdout, including the managed URL, image, platform, and instances. Does not fetch. Before the first successful `get` or `wait`, prints the id and name.
 
 ### Awaited twins
 
 ```python
-await service.get_async()
-await service.wait_async(timeout=None)
-await service.delete_async()
+await service.get_async(*, quiet=False)
+await service.wait_async(timeout=None, *, quiet=False)
+await service.stop_async(*, quiet=False)
+await service.delete_async(*, quiet=False)
 ```
 
-Same calls as the synchronous methods. Cancelling `wait_async` or `get_async` does not delete the endpoint.
+Same calls as the synchronous methods. Cancelling `wait_async` or `get_async` does not delete the endpoint. A cancelled `wait_async` stops polling once a `get` already in flight returns.
 
 ## endpoints
 
@@ -266,7 +299,7 @@ Module-level collection, `ns.endpoints`. It matches the CLI noun `nebius ai endp
 ### `endpoints.get`
 
 ```python
-ns.endpoints.get(endpoint_id, *, profile=None, project=None) -> Service
+ns.endpoints.get(endpoint_id, *, profile=None, project=None, quiet=False) -> Service
 ```
 
 One `nebius ai endpoint get`, starting from an id string. Returns a `Service` whose `record` is already filled. Does not create an endpoint. `token` is `None`.
@@ -276,14 +309,14 @@ One `nebius ai endpoint get`, starting from an id string. Returns a `Service` wh
 ### `endpoints.get_async`
 
 ```python
-await ns.endpoints.get_async(endpoint_id, *, profile=None, project=None) -> Service
+await ns.endpoints.get_async(endpoint_id, *, profile=None, project=None, quiet=False) -> Service
 ```
 
 Same fetch as `endpoints.get`.
 
 ## Errors
 
-Every error is an `Error`, the same types as [reference.md](reference.md#errors). Exception text includes the operation and the endpoint id when those are known. The id is stored on `run_id` so existing handlers see a resource id. Text does not include env values, tokens, or registry passwords.
+Every error is an `Error`, the same types as [reference.md](reference.md#errors). The endpoint id is stored on `run_id` when it is known, so existing handlers see a resource id. Get and delete failures include that id in the text. `operation` is `Endpoint` for constructor errors and the method name otherwise. `recovery` names `endpoints.get` and `delete` instead of `jobs.get` and `cancel`. Text does not include env values or tokens.
 
 | Type | When |
 | --- | --- |
@@ -296,21 +329,27 @@ Every error is an `Error`, the same types as [reference.md](reference.md#errors)
 | `KeyConflict` | The API reports an existing resource and its id is known. |
 | `WaitTimeout` | The local wait ended. The endpoint is unchanged and still bills. |
 
-When `auth="token"`, `token` was omitted, create was accepted, and the response has no token, create raises `Error` with that endpoint id. The caller deletes it and creates again with `token=` set. The client does not invent a replacement token.
-
 Closing the process, a local `WaitTimeout`, and cancelling an awaited twin do not delete the endpoint.
 
-## Out of this proposal
+## Out of scope
 
 - HTTP helpers, inference clients, and application health probes. The caller uses `service.url`.
 - A context manager that deletes on exit. Process death would leave the endpoint billing, and the API has no remote lifetime to enforce.
 - More than one port, and TCP or UDP ports.
 - `--public` / a public IP. The managed `https://` URL does not need it.
 - `stop`, `start`, `restart`, `list`, `delete` of a recipe that was never created, and `get-by-name`.
-- Secret references (`--env-secret`, `--token-secret`). A plain `token` string is in this proposal.
+- Secret references (`--env-secret`, `--token-secret`). A plain `token` string is supported.
 - Source upload and Python function serving. Those belong to [decorators.md](decorators.md).
 - DevLabs, scaling, and extra replicas. One preset is one machine.
 
-## Names to confirm
+## Changes from the proposal
 
-This draft uses `Endpoint` for the recipe, `Service` for the cloud id, and `endpoints.get` for the CLI noun `nebius ai endpoint`. `create` and `delete` match `nebius ai endpoint create` and `nebius ai endpoint delete`. `auth` defaults to `"none"`, matching the CLI. `pricing` defaults to `"on-demand"`, matching `Job`.
+- The API takes the token in `spec.auth_token`, and the CLI generates one locally when `--auth token` has no `--token`. The client does the same, so `Service.token` is always known after create. The proposal's error for a create response without a token is gone.
+- `wait` polls about every 5 seconds, not once a second.
+- `inject_files` is accepted, matching `Job`. It is not a YAML key, also matching `Job`.
+- `quiet=` and progress on stderr follow the job calls. `Service.display()` matches `Run.display()`.
+- `spec.auth_token` is dropped from fetched records.
+
+## Names
+
+This surface uses `Endpoint` for the recipe, `Service` for the cloud id, and `endpoints.get` for the CLI noun `nebius ai endpoint`. `create` and `delete` match `nebius ai endpoint create` and `nebius ai endpoint delete`. `auth` defaults to `"none"`, matching the CLI. `pricing` defaults to `"on-demand"`, matching `Job`.

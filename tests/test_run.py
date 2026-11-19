@@ -251,3 +251,50 @@ def test_display_colors_a_terminal(
         record=failed,
     ).display()
     assert "\x1b[1;31m" in stream.getvalue()
+
+
+def test_wait_never_sleeps_a_negative_time(monkeypatch: object) -> None:
+    import itertools
+    import time
+
+    import pytest
+
+    ticks = itertools.count(0, 0.3)
+    patch = getattr(monkeypatch, "setattr")
+    patch("nebius_serverless.run.monotonic", lambda: next(ticks))
+    pauses: list[float] = []
+
+    def real_sleep(seconds: float, _stop: object = None) -> None:
+        pauses.append(seconds)
+        time.sleep(seconds)  # raises ValueError on a negative pause
+
+    patch("nebius_serverless.run.sleep", real_sleep)
+    fake = FakeTransport()
+    run = _run(fake, states=["RUNNING"])
+    # The deadline passes between the expiry check and the pause.
+    with pytest.raises(ns.WaitTimeout):
+        run.wait(timeout=1.0)
+    assert pauses and min(pauses) >= 0
+
+
+def test_cancel_returns_when_the_request_is_accepted() -> None:
+    from types import SimpleNamespace
+
+    from nebius_serverless.sdk_transport import SdkTransport
+
+    class Operation:
+        resource_id = "aijob-1"
+
+        def sync_wait(self) -> None:
+            raise AssertionError("cancel must not wait for the operation")
+
+    class Client:
+        def cancel(self, request: object) -> SimpleNamespace:
+            return SimpleNamespace(wait=lambda: Operation())
+
+    transport = SdkTransport(profile=None, project="p")
+    transport._client = lambda: Client()  # type: ignore[method-assign]
+    assert transport.cancel("aijob-1") == {
+        "id": "aijob-1",
+        "resource_id": "aijob-1",
+    }

@@ -18,7 +18,7 @@ from .output import (
     log_transport,
     report,
 )
-from .profile import load_profile
+from .profile import resolve_location
 from .recipe import (
     check_identity,
     describe,
@@ -33,7 +33,12 @@ from .recipe import (
     validate_inject_files,
     validate_optional_text,
     validate_pricing,
+    validate_registry_secret,
+    validate_retries,
+    validate_secrets,
+    validate_spot_policy,
     validate_volumes,
+    validate_working_dir,
 )
 from .run import Run
 from .status import Status
@@ -49,6 +54,90 @@ class Job:
     Constructing a ``Job``, loading YAML, or importing the package does
     not authenticate, upload, or create. The Nebius SDK is imported on
     the call that needs a profile or a live create.
+
+    Args:
+        command: Nonempty list of strings, e.g. ``["python", "train.py",
+            "--epochs", "3"]``. The first item is the container command;
+            the rest are POSIX-quoted into one ``args`` string. A shell
+            string is rejected; wrap shell syntax as
+            ``["bash", "-lc", "a && b"]``.
+        image: ``name:tag`` or ``registry/path@sha256:<digest>``, e.g.
+            ``"pytorch/pytorch:2.6.0-cuda12.6-cudnn9-runtime"``. Sent
+            unchanged.
+        gpu: GPU alias such as ``"h100"``, ``"h200"``, ``"b200"``,
+            ``"b300"``, ``"l40s"`` or ``"rtx"``. Picks the smallest
+            one-GPU preset in the project region. Omit it for CPU.
+        platform: Explicit platform id, e.g. ``"gpu-h100-sxm"``.
+            Overrides ``gpu``.
+        preset: Explicit preset id, e.g. ``"1gpu-16vcpu-200gb"``. When
+            omitted, the smallest preset for the platform is used.
+        timeout: Required job deadline: ``"1h"``, ``"24h"``, seconds
+            (``3600``), or a ``timedelta``. Must be 1 to 168 hours.
+        pricing: ``"on-demand"`` (default) or ``"spot"``. Spot is
+            preemptible and not available on CPU.
+        subnet_id: Subnet id, e.g. ``"vpcsubnet-..."``. Only needed
+            when the project has more than one subnet.
+        volumes: Mount strings ``source:/container/path[:ro|rw]`` or
+            ``s3://bucket:/container/path[:ro|rw]`` (no ``:profile``
+            suffix), e.g.
+            ``["s3://my-data:/workspace/data:ro"]``. Mode defaults to
+            ``rw``.
+        inject_files: ``local_path:/container/path`` strings, e.g.
+            ``["./config.yaml:/app/config.yaml"]``. Each file is read on
+            ``create`` and must be at most 64 KiB.
+        env: Plain environment variables, e.g.
+            ``{"WANDB_MODE": "offline"}``. Values are hidden from dry-run
+            output and error text. Use ``secrets`` for tokens.
+        name: Console label. Defaults to ``job-`` plus 12 hex chars.
+            It is not a lookup key.
+        disk: Boot disk size, e.g. ``"500Gi"``. Defaults to ``"250Gi"``.
+        profile: Nebius CLI profile name. Defaults to the active profile.
+        project: Project id, e.g. ``"project-..."``. Overrides the
+            profile's project.
+        retries: How many times Nebius restarts the job after it fails
+            (``restart_attempts``). ``0`` (default) leaves it unset, so
+            the service default applies.
+        working_dir: Container working directory, e.g. ``"/workspace"``.
+            At most 128 characters. Defaults to the image ``WORKDIR``.
+        secrets: Environment variables read from MysteryBox, e.g.
+            ``{"HF_TOKEN": "mbsec-..."}``. Each value is a secret id
+            (``mbsec-``, latest version) or a version id
+            (``mbsecver-``). The variable gets the payload entry whose
+            key matches its name, or the first entry. Names must not
+            repeat ``env``.
+        registry_secret: MysteryBox secret version id (``mbsecver-...``)
+            for a private image registry. The payload must have
+            ``REGISTRY_USERNAME`` and ``REGISTRY_PASSWORD``.
+        spot_policy: Pricing policy id that caps the spot price, e.g.
+            ``"pricingpolicy-..."``. Requires ``pricing="spot"``. The
+            VM is preempted when the spot price goes above the cap.
+
+    Shared memory is always 16 GiB.
+
+    Example::
+
+        import nebius_serverless as ns
+
+        job = ns.Job(
+            ["bash", "-lc", "axolotl train /workspace/data/config.yaml"],
+            image="docker.io/axolotlai/axolotl:main-20260309-py3.11-cu128-2.9.1",
+            gpu="h100",
+            pricing="spot",
+            retries=2,  # restart after preemption or a crash
+            timeout="24h",
+            disk="500Gi",
+            volumes=[
+                "s3://axolotl-data:/workspace/data:ro",
+                "s3://axolotl-artifacts:/workspace/artifacts:rw",
+            ],
+            env={"WANDB_MODE": "offline"},
+            secrets={"HF_TOKEN": "mbsec-..."},  # read from MysteryBox
+            name="axolotl-lora",
+        )
+        print(job.create(dry_run=True))  # inspect the request only
+        run = job.create()
+        run.wait()
+        run.display()
     """
 
     def __init__(
@@ -69,6 +158,11 @@ class Job:
         disk: str | None = None,
         profile: str | None = None,
         project: str | None = None,
+        retries: int = 0,
+        working_dir: str | None = None,
+        secrets: Mapping[str, str] | None = None,
+        registry_secret: str | None = None,
+        spot_policy: str | None = None,
     ) -> None:
         self.command = validate_command(command)
         self.image = validate_image(image)
@@ -88,6 +182,11 @@ class Job:
         self.disk = validate_disk(validate_optional_text(disk, "disk"))
         self.profile = validate_optional_text(profile, "profile")
         self.project = validate_optional_text(project, "project")
+        self.retries = validate_retries(retries)
+        self.working_dir = validate_working_dir(working_dir)
+        self.secrets = validate_secrets(secrets, self.env)
+        self.registry_secret = validate_registry_secret(registry_secret)
+        self.spot_policy = validate_spot_policy(spot_policy, self.pricing)
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "Job":
@@ -193,7 +292,7 @@ class Job:
         transport: Transport | None,
         progress: Progress,
     ) -> Run | dict[str, object]:
-        project_id, region_id = _location(
+        project_id, region_id = resolve_location(
             profile=self.profile,
             project=project if project is not None else self.project,
             region=region,
@@ -224,6 +323,11 @@ class Job:
             env_keys=[key for key, _value in self.env],
             name=self.name,
             disk=self.disk,
+            retries=self.retries,
+            working_dir=self.working_dir,
+            secrets=self.secrets,
+            registry_secret=self.registry_secret,
+            spot_policy=self.spot_policy,
         )
         if dry_run:
             return description
@@ -242,6 +346,11 @@ class Job:
             env=self.env,
             name=self.name,
             disk=self.disk,
+            retries=self.retries,
+            working_dir=self.working_dir,
+            secrets=self.secrets,
+            registry_secret=self.registry_secret,
+            spot_policy=self.spot_policy,
         )
         started = time.perf_counter()
         try:
@@ -281,27 +390,6 @@ class Job:
             transport=chosen,
             create_state=result.state,
         )
-
-
-def _location(
-    *,
-    profile: str | None,
-    project: str | None,
-    region: str | None,
-) -> tuple[str, str]:
-    project_id = project
-    region_id = region
-    if project_id is None or region_id is None:
-        loaded_project, loaded_region = load_profile(profile)
-        if project_id is None:
-            project_id = loaded_project
-        if region_id is None:
-            region_id = loaded_region
-    if region_id is None:
-        from .sdk_transport import project_region
-
-        region_id = project_region(profile, project_id)
-    return project_id, region_id
 
 
 def _sdk_transport(profile: str | None, project: str) -> Transport:

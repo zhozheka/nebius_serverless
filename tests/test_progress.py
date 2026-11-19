@@ -555,15 +555,11 @@ def test_notebook_is_plain(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_cancelling_wait_async_prints_nothing_more(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import nebius_serverless.output as output
-
     stream = _TTY()
     _terminal(monkeypatch, stream)
     monkeypatch.setattr("nebius_serverless.run.monotonic", lambda: 1.0)
-    monkeypatch.setattr("nebius_serverless.run.sleep", lambda _seconds: None)
     started = threading.Event()
     release = threading.Event()
-    rendered = threading.Event()
     calls = {"n": 0}
     fake = FakeTransport()
 
@@ -572,24 +568,13 @@ def test_cancelling_wait_async_prints_nothing_more(
         if calls["n"] == 1:
             started.set()
             assert release.wait(5)
-            state = "RUNNING"
-        else:
-            state = "COMPLETED"
         return {
             "metadata": {"id": job_id, "name": "saved"},
-            "status": {"state": state},
+            "status": {"state": "RUNNING"},
         }
 
     fake.get = get  # type: ignore[method-assign]
     run = _create(fake, quiet=True)
-    original = output.report
-
-    def wrapped(fact: object, handle: object) -> None:
-        original(fact, handle)  # type: ignore[arg-type]
-        if calls["n"] >= 2:
-            rendered.set()
-
-    monkeypatch.setattr(output, "report", wrapped)
 
     async def cancel_wait() -> None:
         task = asyncio.create_task(run.wait_async())
@@ -598,10 +583,10 @@ def test_cancelling_wait_async_prints_nothing_more(
         with pytest.raises(asyncio.CancelledError):
             await task
         release.set()
-        assert await asyncio.to_thread(rendered.wait, 5)
 
+    # asyncio.run returns only after the worker thread has exited.
     asyncio.run(cancel_wait())
-    assert calls["n"] >= 2
+    assert calls["n"] == 1
     assert fake.cancels == []
     assert stream.getvalue() == ""
 
@@ -611,7 +596,9 @@ def test_overlapping_waits_and_a_later_spinner(
 ) -> None:
     stream = _TTY()
     _terminal(monkeypatch, stream)
-    monkeypatch.setattr("nebius_serverless.run.sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "nebius_serverless.run.sleep", lambda _seconds, _stop=None: None
+    )
     barrier = threading.Barrier(2)
 
     def run_wait(job_id: str) -> None:
@@ -960,7 +947,7 @@ clock = {"now": 0.0}
 def monotonic():
     return clock["now"]
 
-def sleep(seconds):
+def sleep(seconds, stop=None):
     clock["now"] += seconds
 
 import nebius_serverless.run as run_mod

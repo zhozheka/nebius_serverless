@@ -99,3 +99,58 @@ def test_cancelling_wait_does_not_cancel_the_job() -> None:
     asyncio.run(cancel_wait())
     release.set()
     assert fake.cancels == []
+
+
+_CANCEL_SCRIPT = r"""
+import asyncio, sys, time
+sys.path.insert(0, "tests")
+from fakes import FakeEndpointTransport, FakeTransport
+import nebius_serverless as ns
+
+kind = sys.argv[1]
+if kind == "job":
+    fake = FakeTransport()
+    fake.states = ["RUNNING"]
+    handle = ns.Job(["x"], image="a:b", timeout="1h").create(
+        region="eu-north1", project="p", transport=fake, quiet=True)
+else:
+    fake = FakeEndpointTransport()
+    fake.states = ["PROVISIONING"]
+    handle = ns.Endpoint(image="a:b", port=80).create(
+        region="eu-north1", project="p", transport=fake, quiet=True)
+
+async def main():
+    task = asyncio.create_task(handle.wait_async(quiet=True))
+    while not fake.gets:
+        await asyncio.sleep(0.01)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+started = time.monotonic()
+asyncio.run(main())
+print(len(fake.gets), round(time.monotonic() - started, 1))
+"""
+
+
+@pytest.mark.parametrize("kind", ["job", "endpoint"])
+def test_cancelled_wait_async_stops_polling_and_lets_the_process_exit(
+    kind: str,
+) -> None:
+    import subprocess
+    import sys
+
+    # The real poll interval (10s / 5s) applies: only the stop signal can
+    # end this quickly. Before the fix the child polled until killed.
+    out = subprocess.run(
+        [sys.executable, "-c", _CANCEL_SCRIPT, kind],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert out.returncode == 0, out.stderr
+    gets, seconds = out.stdout.split()
+    assert int(gets) == 1
+    assert float(seconds) < 2.0
